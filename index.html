@@ -14,6 +14,31 @@
     <aside>
       <h1>Детали имеют значение</h1>
       <p>Геометрия → сетка → проверка → температурное поле.</p>
+      <details>
+        <summary>Как начать свой узел</summary>
+        <ol>
+          <li>
+            Откройте «Геометрия JSON / DXF» и загрузите плоский DXF в XY, Z=0.
+          </li>
+          <li>
+            В «Материалы и теплоотдача» назначьте материал каждой области.
+            Внутреннюю пустоту удалите из списка областей.
+          </li>
+          <li>
+            Включите «Выбрать грань», щёлкните контур, введите температуру и
+            нажмите «Задать T». Повторите для другой стороны.
+          </li>
+          <li>
+            Для воздуха измените тип условия на «Воздух + h» в таблице и задайте
+            h. Отметьте внутренние грани для расчёта Tsi,min. Нажмите «Применить
+            параметры».
+          </li>
+          <li>
+            Рассчитайте и проверьте сходимость на трёх сетках. Скачайте JSON для
+            переноса и резервной копии.
+          </li>
+        </ol>
+      </details>
       <label
         >Расчётный узел<select id="example">
           <option value="steel">Контроль · окно со сталью 4 мм</option>
@@ -262,11 +287,11 @@
       </p>
     </section>
   </main>
-  <script src="material-catalog.js?v=20261027"></script>
+  <script src="material-catalog.js?v=20261027-2"></script>
   <script src="temperature-palette.js?v=20261026-2"></script>
   <script src="fem-examples.js?v=20261026-hole"></script>
   <script src="fem-solver.js?v=20261026-2"></script>
-  <script src="fem-edges.js?v=20261027"></script>
-  <script src="dxf-import.js?v=20261027"></script>
-  <script src="fem-view.js?v=20261027"></script>
+  <script src="fem-edges.js?v=20261027-2"></script>
+  <script src="dxf-import.js?v=20261027-2"></script>
+  <script src="fem-view.js?v=20261027-2"></script>
 </html>

@@ -323,6 +323,17 @@
       i--;
       const get = (code) => data.find((entry) => entry.code === code)?.value;
       const layer = get(8) || "0";
+      if (
+        data.some(
+          (e) =>
+            [30, 31, 38, 210, 220].includes(e.code) &&
+            Math.abs(Number(e.value)) > 1e-9,
+        ) ||
+        data.some((e) => e.code === 230 && Math.abs(Number(e.value) - 1) > 1e-9)
+      )
+        throw Error(
+          "DXF не в плоскости XY при Z=0. Экспортируйте плоское сечение без 3D-преобразований.",
+        );
 
       if (type === "LINE") {
         const x1 = Number(get(10));
