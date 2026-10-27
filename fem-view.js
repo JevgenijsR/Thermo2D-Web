@@ -154,21 +154,20 @@
   }
   function applyControls() {
     try {
+      const next = structuredClone(model);
       for (const e of $("model-controls").querySelectorAll("input,select")) {
         const o =
           e.dataset.region !== undefined
-            ? model.regions[+e.dataset.region]
-            : model.boundaries[+e.dataset.boundary];
+            ? next.regions[+e.dataset.region]
+            : next.boundaries[+e.dataset.boundary];
         const p = e.dataset.prop;
         if (e.type === "checkbox") o[p] = e.checked;
         else if (e.value === "") delete o[p];
         else o[p] = p === "type" ? e.value : Number(e.value);
       }
-      model.userEdited = true;
-      $("example").value = "custom";
-      ThermoFEM.validate(model);
-      invalidate();
-      controls();
+      ThermoFEM.validate(next);
+      model = next;
+      changed();
     } catch (e) {
       $("status").textContent = e.message;
     }
