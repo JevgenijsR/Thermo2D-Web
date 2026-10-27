@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ru">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Thermo2D · Треугольный расчёт</title
+  ><link rel="stylesheet" href="fem.css?v=20261026-2" />
+  <header>
+    <a href="./">T2 / Thermo2D</a
+    ><span>Треугольная сетка · стационарный FEM</span
+    ><small>Расчёт в вашем браузере</small>
+  </header>
+  <main>
+    <aside>
+      <h1>Детали имеют значение</h1>
+      <p>Геометрия → сетка → проверка → температурное поле.</p>
+      <label
+        >Расчётный узел<select id="example">
+          <option value="steel">Контроль · окно со сталью 4 мм</option>
+          <option value="wood">Контроль · окно без металла</option>
+          <option value="wall">Проверка · простая стена</option>
+          <option value="hole">Проверка · отверстие Ø40 мм в центре</option>
+          <option value="solid">Проверка · сплошная панель</option>
+          <option value="custom">Моя модель из редактора / JSON</option>
+        </select></label
+      >
+      <p id="description" class="description"></p>
+      <div class="pair">
+        <label
+          >Базовый размер, мм<input
+            id="base"
+            type="number"
+            value="20"
+            min=".01"
+            step="1" /></label
+        ><label
+          >Минимальный, мм<input
+            id="minimum"
+            type="number"
+            value=".8"
+            min=".01"
+            step=".1"
+        /></label>
+      </div>
+      <p class="note">
+        Локальный размер вставки равен минимальному. Для других областей задайте
+        h в таблице. Фактические рёбра и качество показаны после расчёта.
+      </p>
+      <div class="pair">
+        <label
+          >Порог ΔQ′, %<input
+            id="target-q"
+            type="number"
+            value="1"
+            min=".001"
+            step=".1" /></label
+        ><label
+          >Порог ΔTsi, °C<input
+            id="target-t"
+            type="number"
+            value=".1"
+            min=".001"
+            step=".01"
+        /></label>
+      </div>
+      <button id="run">Рассчитать узел</button
+      ><button id="study" class="secondary">
+        Сравнить металл / без · 3 сетки</button
+      ><button id="cancel" class="secondary" disabled>Отменить расчёт</button>
+      <button id="adapt" class="secondary" disabled>
+        Уточнить локально по потокам
+      </button>
+      <p id="status" role="status">
+        Готов к расчёту. Размеры контрольного узла — тестовые.
+      </p>
+      <details>
+        <summary>Материалы и теплоотдача</summary>
+        <p class="note">
+          λ — Вт/(м·К), ρ — кг/м³, c — Дж/(кг·К). ρ и c справочные, стационарный
+          расчёт использует λ. Начальные значения уточняйте по паспорту.
+        </p>
+        <label>Область<select id="region-choice"></select></label>
+        <label
+          >Материал из библиотеки<select id="catalog-choice"></select
+        ></label>
+        <p id="catalog-note" class="note"></p>
+        <details>
+          <summary>Добавить свой материал</summary>
+          <label>Название<input id="custom-material-name" type="text" /></label>
+          <label
+            >λ, Вт/(м·К)<input
+              id="custom-material-lambda"
+              type="number"
+              min=".000001"
+              step=".001"
+              value=".1"
+          /></label>
+          <label
+            >ρ, кг/м³ (необязательно)<input
+              id="custom-material-density"
+              type="number"
+              min="0"
+          /></label>
+          <label
+            >c, Дж/(кг·К) (необязательно)<input
+              id="custom-material-capacity"
+              type="number"
+              min="0"
+          /></label>
+          <button id="save-custom-material" class="secondary">
+            Сохранить материал в этом браузере
+          </button>
+        </details>
+        <button id="assign-catalog" class="secondary">
+          Назначить материал
+        </button>
+        <button id="make-hole" class="secondary">
+          Удалить область → отверстие / пустота
+        </button>
+        <div id="model-controls"></div>
+        <p class="note">
+          Температура поверхности — фиксированное T. Воздух — T и h, Вт/(м²·К).
+          Неназначенные грани изолированы. Полости и контактные сопротивления не
+          моделируются.
+        </p>
+        <button id="apply" class="secondary">Применить параметры</button>
+      </details>
+      <details>
+        <summary>Геометрия JSON / DXF</summary>
+        <label
+          >Единицы DXF<select id="dxf-units">
+            <option value="auto">Из файла</option>
+            <option value="mm">мм</option>
+            <option value="cm">см</option>
+            <option value="m">м</option>
+            <option value="in">дюймы</option>
+          </select></label
+        >
+        <label
+          >Импорт узла DXF<input id="import-dxf" type="file" accept=".dxf"
+        /></label>
+        <p class="note">
+          LINE и LWPOLYLINE, замкнутые контуры. Кривые, блоки и неподдерживаемые
+          сущности отклоняются. Перед импортом скачайте текущую модель.
+          Вложенный контур сначала становится отдельной областью: для пустоты
+          выберите его и нажмите «Удалить область → отверстие».
+        </p>
+        <p class="note">
+          Координаты в мм. Области points, holes, lambda, h; грани a, b,
+          temperature, type: film / temperature. Пересечения и наложения
+          отклоняются. Раздельные области требуют температурной опоры.
+        </p>
+        <textarea
+          id="model-json"
+          spellcheck="false"
+          aria-label="Модель JSON"
+        ></textarea
+        ><button id="apply-json" class="secondary">Применить JSON</button
+        ><label
+          >Загрузить модель<input
+            id="import"
+            type="file"
+            accept=".json" /></label
+        ><button id="save-model" class="secondary">Скачать модель</button>
+        <button id="save-browser-model" class="secondary">
+          Сохранить узел в этом браузере
+        </button>
+        <label>Мои FEM-узлы<select id="saved-model-choice"></select></label>
+        <button id="load-browser-model" class="secondary">
+          Открыть сохранённый узел
+        </button>
+        <p class="note">
+          На другом компьютере загрузите скачанный JSON. Браузерное хранилище не
+          синхронизируется; ваши файлы не отправляются на сервер.
+        </p>
+      </details>
+      <p class="note warning">
+        2D — непрерывное включение. Отдельный шуруп требует 3D или обоснованной
+        периодической модели. Эквивалентный крепёж и 3D здесь ещё не
+        реализованы.
+      </p>
+    </aside>
+    <section class="results">
+      <div class="toolbar">
+        <label><input id="pick-edge" type="checkbox" /> Выбрать грань</label>
+        <input
+          id="edge-temperature"
+          type="number"
+          value="22"
+          aria-label="Температура выбранной грани"
+        />
+        <button id="set-edge" class="secondary">Задать T, °C</button
+        ><button id="clear-edge" class="secondary">Изолировать грань</button>
+        <span id="edge-info">Грань не выбрана</span>
+      </div>
+      <div class="toolbar">
+        <label><input id="mesh" type="checkbox" /> Сетка</label
+        ><label><input id="flux" type="checkbox" /> Потоки q</label
+        ><label><input id="iso" type="checkbox" checked /> Изотерма</label
+        ><input
+          id="iso-value"
+          aria-label="Изотерма °C"
+          type="number"
+          value="0"
+          step="1"
+        /><span>°C</span
+        ><label><input id="auto" type="checkbox" /> Автошкала</label
+        ><input
+          id="scale-min"
+          aria-label="Минимум шкалы"
+          type="number"
+          value="-10"
+        /><input
+          id="scale-max"
+          aria-label="Максимум шкалы"
+          type="number"
+          value="22"
+        /><button id="fit" class="secondary">Вписать</button>
+      </div>
+      <div class="scale">
+        <strong>Температура, °C</strong>
+        <div id="ramp"></div>
+        <div id="ticks"></div>
+        <small id="scale-note">Общий фиксированный диапазон −10…+22 °C</small>
+      </div>
+      <div class="views">
+        <article>
+          <h2>Материалы <small>одинаковый масштаб</small></h2>
+          <canvas id="materials"></canvas>
+        </article>
+        <article>
+          <h2>Температура <small>линейные функции формы FEM</small></h2>
+          <canvas id="temperature"></canvas>
+        </article>
+      </div>
+      <p id="hover">
+        Колесо — масштаб обоих видов; перетаскивание — перемещение. Наведите на
+        узел для T и |q|.
+      </p>
+      <div id="metrics" class="metrics"></div>
+      <div class="downloads">
+        <button id="export-image" class="secondary" disabled>
+          PNG со шкалой · 2400 px</button
+        ><button id="export-result" class="secondary" disabled>
+          Результат + реальная сетка JSON</button
+        ><select
+          id="result-choice"
+          aria-label="Рассчитанный вариант"
+          hidden
+        ></select>
+      </div>
+      <div id="convergence"></div>
+      <details>
+        <summary>Отчёт по границам</summary>
+        <div id="heat-report"></div>
+      </details>
+      <p class="note">
+        Сетка согласована с полигональными контурами и отверстиями. Сгущение
+        геометрическое, с плавным ростом размера; проверка ошибки —
+        последовательное уточнение. Это не сертифицированный расчёт. Малый
+        баланс сам по себе не доказывает пространственную точность.
+      </p>
+    </section>
+  </main>
+  <script src="material-catalog.js?v=20261027"></script>
+  <script src="temperature-palette.js?v=20261026-2"></script>
+  <script src="fem-examples.js?v=20261026-hole"></script>
+  <script src="fem-solver.js?v=20261026-2"></script>
+  <script src="fem-edges.js?v=20261027"></script>
+  <script src="dxf-import.js?v=20261027"></script>
+  <script src="fem-view.js?v=20261027"></script>
+</html>
