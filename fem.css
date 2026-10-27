@@ -298,3 +298,59 @@ th {
     padding: 12px;
   }
 }
+
+.views {
+  grid-template-columns: minmax(0, 1fr);
+}
+aside h2 {
+  font-size: 17px;
+  margin: 22px 0 10px;
+}
+#boundary-controls {
+  overflow: auto;
+}
+#boundary-controls input {
+  width: 65px;
+  padding: 4px;
+}
+#boundary-controls select {
+  width: 95px;
+  padding: 4px;
+}
+#boundary-controls input[type="checkbox"] {
+  width: auto;
+}
+#model-controls small {
+  display: block;
+}
+.edge-tools input[type="number"] {
+  width: 100%;
+}
+.toolbar input[type="file"] {
+  max-width: 210px;
+  font-size: 11px;
+}
+.toolbar .note {
+  flex-basis: 100%;
+  margin: 0 0 8px;
+}
+[hidden] {
+  display: none !important;
+}
+
+@media (min-width: 701px) {
+  aside {
+    height: calc(100vh - 66px);
+    overflow: auto;
+    position: sticky;
+    top: 0;
+  }
+  .results {
+    min-width: 0;
+  }
+}
+
+#region-info {
+  padding: 0 16px;
+  min-height: 18px;
+}

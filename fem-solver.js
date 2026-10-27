@@ -246,14 +246,14 @@
               );
               y = v[j] - y <= 1.5 * d ? v[j] : y + d;
               out.push(y);
-              if (out.length + nodes.length > 200000)
+              if (!options.unlimited && out.length + nodes.length > 200000)
                 throw Error(
                   "Сетка превышает 200 000 узлов. Увеличьте размер элемента.",
                 );
             }
           } else out.push(v[j]);
         }
-        if (out.length + nodes.length > 200000)
+        if (!options.unlimited && out.length + nodes.length > 200000)
           throw Error(
             "Сетка превышает 200 000 узлов. Увеличьте размер элемента.",
           );
@@ -306,7 +306,7 @@
       }
     });
     triangles.forEach((t) => (t.v = t.v.map((i) => map.get(i))));
-    if (triangles.length > 300000)
+    if (!options.unlimited && triangles.length > 300000)
       throw Error("Сетка превышает 300 000 треугольников.");
     const edges = new Map(),
       areas = regions.map(() => 0);

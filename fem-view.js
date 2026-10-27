@@ -2,7 +2,7 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id),
-    canvases = [$("materials"), $("temperature")];
+    canvases = [$("temperature")];
   const fmt = (n, d = 3) =>
     n === null
       ? "—"
@@ -23,7 +23,9 @@
       return ThermoMaterials;
     }
   })();
-  let selectedEdge = null;
+  let selectedEdge = null,
+    selectedRegion = null,
+    overlay = null;
   let model = FEMExamples.windowNode(),
     result = null,
     results = [],
@@ -45,6 +47,98 @@
           "'": "&#39;",
         })[c],
     );
+
+  function materialLabel(m) {
+    const name = m.name || "Материал";
+    const category =
+      m.category ||
+      (/вата|утеплитель|XPS|EPS|PIR|пен[ао]/i.test(name)
+        ? "Теплоизоляция"
+        : /газобетон|Fibo|кирпич/i.test(name)
+          ? "Блоки и кладка"
+          : /дерев|древес|OSB/i.test(name)
+            ? "Дерево"
+            : /сталь|алюмин|металл/i.test(name)
+              ? "Металлы"
+              : /бетон|стяжка/i.test(name)
+                ? "Бетоны и растворы"
+                : /битум|EPDM/i.test(name)
+                  ? "Гидроизоляция"
+                  : /воздух/i.test(name)
+                    ? "Воздух"
+                    : /грунт|песок|суглинок|глина|щебень/i.test(name)
+                      ? "Грунт"
+                      : "Прочие");
+    return `${category} — ${name}`;
+  }
+  function inside(p, ring) {
+    let hit = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const a = ring[i],
+        b = ring[j];
+      if (
+        a.y > p.y !== b.y > p.y &&
+        p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x
+      )
+        hit = !hit;
+    }
+    return hit;
+  }
+  function syncRegion() {
+    const r = model.regions[+$("region-choice").value];
+    if (!r) return;
+    $("region-mode").value =
+      r.temperature === undefined ? "conductive" : "temperature";
+    $("region-temperature").value = r.temperature ?? 30;
+    $("region-temperature").disabled = r.temperature === undefined;
+    const xs = r.points.map((p) => p.x),
+      ys = r.points.map((p) => p.y);
+    $("region-info").textContent =
+      `${r.name || "Контур"} · ${r.materialName || (r.materialPending ? "материал не назначен" : "λ=" + r.lambda)} · габариты ${fmt(Math.max(...xs) - Math.min(...xs), 2)} × ${fmt(Math.max(...ys) - Math.min(...ys), 2)} мм${r.temperature === undefined ? "" : " · постоянная T=" + r.temperature + " °C"}`;
+  }
+  $("region-choice").onchange = () => {
+    selectedRegion = +$("region-choice").value;
+    syncRegion();
+    schedule();
+  };
+  $("region-mode").onchange = () => {
+    $("region-temperature").disabled = $("region-mode").value !== "temperature";
+  };
+  $("apply-region-temperature").onclick = () => {
+    const r = model.regions[+$("region-choice").value];
+    if (!r) return;
+    if ($("region-mode").value === "temperature") {
+      const t = +$("region-temperature").value;
+      if ($("region-temperature").value === "" || !Number.isFinite(t)) {
+        $("status").textContent = "Введите температуру контура.";
+        return;
+      }
+      r.temperature = t;
+    } else delete r.temperature;
+    changed();
+  };
+  $("overlay-file").onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f),
+      img = new Image();
+    try {
+      img.src = url;
+      await img.decode();
+      overlay = img;
+      schedule();
+    } catch {
+      $("status").textContent = "Не удалось открыть изображение оверлея.";
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+  $("remove-overlay").onclick = () => {
+    overlay = null;
+    $("overlay-file").value = "";
+    schedule();
+  };
+
   function stop() {
     revision++;
     worker?.terminate();
@@ -98,8 +192,14 @@
       $("region-choice").value = regionChoice;
     if (!$("catalog-choice").options.length)
       $("catalog-choice").replaceChildren(
-        ...catalog.map((m) => new Option(`${m.name} · λ ${m.lambda}`, m.id)),
+        ...catalog
+          .slice()
+          .sort((a, b) =>
+            materialLabel(a).localeCompare(materialLabel(b), "ru"),
+          )
+          .map((m) => new Option(`${materialLabel(m)} · λ ${m.lambda}`, m.id)),
       );
+    syncRegion();
     catalogNote();
     $("study").textContent = ["steel", "wood"].includes($("example").value)
       ? "Сравнить металл / без · 3 сетки"
@@ -118,7 +218,9 @@
             `<tr><td>${esc(r.name || i)}<small>${esc(r.materialName || (r.materialPending ? "Материал не назначен" : "Задано в модели"))}</small></td><td><input data-region="${i}" data-prop="lambda" type="number" min=".000001" step=".01" value="${r.lambda}"></td><td><input data-region="${i}" data-prop="h" type="number" min=".001" step=".1" value="${r.h ?? ""}" placeholder="Авто"></td></tr>`,
         )
         .join("") +
-      "</table><h3>Граничные условия</h3><table><tr><th>Грань</th><th>Тип</th><th>T, °C</th><th>h</th><th>Внутри</th></tr>" +
+      "</table>";
+    $("boundary-controls").innerHTML =
+      "<h3>Граничные условия</h3><table><tr><th>Грань</th><th>Тип</th><th>T, °C</th><th>h</th><th>Внутри</th></tr>" +
       (model.boundaries || [])
         .map(
           (b, i) =>
@@ -126,8 +228,10 @@
         )
         .join("") +
       "</table>";
-    $("model-controls")
-      .querySelectorAll("input,select")
+    document
+      .querySelectorAll(
+        "#model-controls input, #model-controls select, #boundary-controls input, #boundary-controls select",
+      )
       .forEach(
         (e) =>
           (e.oninput = () => {
@@ -139,6 +243,8 @@
       );
   }
   function select() {
+    overlay = null;
+    selectedRegion = null;
     invalidate();
     if (["hole", "solid"].includes($("example").value)) {
       model = FEMExamples.holeNode($("example").value === "hole");
@@ -155,7 +261,9 @@
   function applyControls() {
     try {
       const next = structuredClone(model);
-      for (const e of $("model-controls").querySelectorAll("input,select")) {
+      for (const e of document.querySelectorAll(
+        "#model-controls input, #model-controls select, #boundary-controls input, #boundary-controls select",
+      )) {
         const o =
           e.dataset.region !== undefined
             ? next.regions[+e.dataset.region]
@@ -212,7 +320,7 @@
       h = canvas.height,
       v = view(w, exporting ? h - 200 : h),
       { min, max } = range();
-    if (exporting) v.y += 200;
+
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, w, h);
@@ -283,10 +391,29 @@
         ctx.fillStyle = r.color || colors[i % colors.length];
         ctx.fill("evenodd");
       }
-      ctx.strokeStyle = "#182529";
-      ctx.lineWidth = exporting ? 1.3 : 0.7 * (devicePixelRatio || 1);
+      ctx.strokeStyle = i === selectedRegion ? "#a000cc" : "#182529";
+      ctx.lineWidth =
+        i === selectedRegion
+          ? 3
+          : exporting
+            ? 1.3
+            : 0.7 * (devicePixelRatio || 1);
       ctx.stroke();
     });
+    if (overlay && $("show-overlay").checked) {
+      const bounds = geometry(),
+        top = screen({ x: bounds.minX, y: bounds.maxY }, v);
+      ctx.save();
+      ctx.globalAlpha = 1 - +$("overlay-opacity").value / 100;
+      ctx.drawImage(
+        overlay,
+        top.x,
+        top.y,
+        (bounds.maxX - bounds.minX) * v.s,
+        (bounds.maxY - bounds.minY) * v.s,
+      );
+      ctx.restore();
+    }
     if (result && $("mesh").checked) {
       ctx.strokeStyle = "rgba(0,0,0,.32)";
       ctx.lineWidth = exporting ? 0.6 : 0.4 * (devicePixelRatio || 1);
@@ -403,7 +530,7 @@
     ctx.font = `bold ${13 * (canvas.clientWidth ? w / canvas.clientWidth : w / 1000)}px system-ui`;
     for (const b of model.boundaries || []) {
       const p = screen({ x: (b.a.x + b.b.x) / 2, y: (b.a.y + b.b.y) / 2 }, v);
-      const label = `${fmt(b.temperature)} °C${b.type === "film" ? " (воздух)" : ""}`;
+      const label = `${fmt(b.temperature)} °C${$("boundary-medium").checked ? (b.type === "film" ? " (воздух)" : " (поверхность)") : ""}`;
       const lx = Math.max(
           6,
           Math.min(w - ctx.measureText(label).width - 6, p.x + 5),
@@ -438,6 +565,7 @@
     }
   }
   function draw() {
+    document.querySelector(".scale").hidden = !$("show-scale").checked;
     const { min, max } = range();
     $("ramp").style.background = ThermoPalette.css;
     $("ticks").replaceChildren();
@@ -474,7 +602,7 @@
         dpr = window.devicePixelRatio || 1;
       canvas.width = Math.round(rect.width * dpr);
       canvas.height = Math.round(rect.height * dpr);
-      paint(canvas, i === 1);
+      paint(canvas, $("show-result").checked);
     });
   }
   function schedule() {
@@ -640,7 +768,7 @@
     if (!study && !adaptive && ["steel", "wood"].includes($("example").value))
       jobs[0].model.regions[6].h = minimum;
     const id = revision;
-    worker = new Worker("fem-worker.js?v=20261026-2");
+    worker = new Worker("fem-worker.js?v=20261027-4");
     $("status").textContent = "Строю сетку…";
     worker.onmessage = ({ data }) => {
       if (data.id !== revision) return;
@@ -678,6 +806,9 @@
       stop();
       $("status").textContent = "Ошибка Worker: " + e.message;
     };
+    jobs.forEach((job) => {
+      job.options.unlimited = $("unlimited-mesh").checked;
+    });
     worker.postMessage({ id, jobs });
   }
   function download(name, blob) {
@@ -702,7 +833,7 @@
     $("status").textContent =
       "Расчёт отменён. Завершённые варианты доступны; незавершённое решение не принято.";
   };
-  $("apply").onclick = applyControls;
+  $("apply").onclick = $("apply-boundaries").onclick = applyControls;
   $("adapt").onclick = () => run(false, true);
   $("apply-json").onclick = () => {
     try {
@@ -711,6 +842,8 @@
       ThermoFEM.validate(m);
       m.userEdited = true;
       model = m;
+      overlay = null;
+      selectedRegion = null;
       $("example").value = "custom";
       invalidate();
       controls();
@@ -722,6 +855,22 @@
     const v = JSON.parse(localStorage.getItem("thermo2d.fem-nodes.v1") || "[]");
     if (!Array.isArray(v)) throw Error("Неверный формат сохранённых FEM-узлов");
     return v;
+  }
+  function saveImportedModel() {
+    try {
+      const saved = savedModels();
+      saved.push({
+        name: `${model.name || "Загруженный узел"} · ${new Date().toLocaleString("ru-RU")}`,
+        model: structuredClone(model),
+      });
+      localStorage.setItem("thermo2d.fem-nodes.v1", JSON.stringify(saved));
+      savedModelChoices();
+      return true;
+    } catch (e) {
+      $("status").textContent =
+        "Узел открыт, но не сохранён в браузере: " + e.message;
+      return false;
+    }
   }
   function savedModelChoices() {
     try {
@@ -755,6 +904,8 @@
       const next = structuredClone(saved.model);
       ThermoFEM.validate(next);
       model = next;
+      overlay = null;
+      selectedRegion = null;
       changed();
       zoom = 1;
       pan = { x: 0, y: 0 };
@@ -780,6 +931,8 @@
       const m = {
         id: "user-" + crypto.randomUUID(),
         name,
+        category:
+          $("custom-material-category").value.trim() || "Пользовательские",
         lambda,
         density: optional("custom-material-density"),
         heatCapacity: optional("custom-material-capacity"),
@@ -797,7 +950,14 @@
         JSON.stringify([...saved, m]),
       );
       catalog.push(m);
-      $("catalog-choice").add(new Option(`${m.name} · λ ${m.lambda}`, m.id));
+      $("catalog-choice").replaceChildren(
+        ...catalog
+          .slice()
+          .sort((a, b) =>
+            materialLabel(a).localeCompare(materialLabel(b), "ru"),
+          )
+          .map((v) => new Option(`${materialLabel(v)} · λ ${v.lambda}`, v.id)),
+      );
       $("catalog-choice").value = m.id;
       catalogNote();
     } catch (e) {
@@ -844,11 +1004,14 @@
       );
       model = next;
       model.name = file.name;
+      overlay = null;
+      selectedRegion = null;
+      const saved = saveImportedModel();
       zoom = 1;
       pan = { x: 0, y: 0 };
       changed();
       $("status").textContent =
-        `Импортировано областей: ${model.regions.length}. Назначьте материалы и условия граням.`;
+        `Импортировано областей: ${model.regions.length}. Назначьте материалы и условия граням.${saved ? " Копия добавлена в свои узлы." : " Не удалось сохранить в браузере — скачайте JSON."}`;
     } catch (e) {
       $("status").textContent = e.message;
     }
@@ -889,12 +1052,22 @@
       if (lo < 0) retained.push({ ...bc, a: point(lo), b: point(0) });
       if (hi > 1) retained.push({ ...bc, a: point(1), b: point(hi) });
     }
+    if (
+      !clear &&
+      $("edge-type").value === "film" &&
+      !(+$("edge-h").value > 0)
+    ) {
+      $("status").textContent = "Введите положительную теплоотдачу h.";
+      return;
+    }
     if (!clear)
       retained.push({
         name: `T=${temperature} °C`,
         a,
         b,
-        type: "temperature",
+        type: $("edge-type").value,
+        h: +$("edge-h").value,
+        interior: $("edge-interior").checked,
         temperature,
       });
     model.boundaries = retained;
@@ -905,12 +1078,15 @@
   $("import").onchange = async (e) => {
     try {
       $("model-json").value = await e.target.files[0].text();
+      const parsed = JSON.parse($("model-json").value);
+      ThermoFEM.validate(parsed);
       $("apply-json").click();
+      saveImportedModel();
     } catch (e) {
       $("status").textContent = e.message;
     }
   };
-  $("save-model").onclick = () =>
+  $("download-model").onclick = $("save-model").onclick = () =>
     jsonDownload("Thermo2D-FEM-model.json", model);
   $("export-result").onclick = () =>
     jsonDownload("Thermo2D-FEM-result.json", {
@@ -922,7 +1098,11 @@
         heat: r.heat,
       })),
     });
-  $("export-image").onclick = () => {
+  function exportImage(format = "png") {
+    if (!result) {
+      $("status").textContent = "Сначала рассчитайте узел.";
+      return;
+    }
     const limits = range();
     if (
       !(
@@ -938,46 +1118,108 @@
     const canvas = document.createElement("canvas");
     canvas.width = 2400;
     canvas.height = 2200;
-    paint(canvas, true, true);
+    paint(canvas, $("show-result").checked, true);
     const ctx = canvas.getContext("2d"),
       { min, max } = range();
     ctx.fillStyle = "rgba(255,255,255,.96)";
-    ctx.fillRect(0, 0, 2400, 180);
+    ctx.fillRect(0, 2000, 2400, 200);
     ctx.fillStyle = "#18383d";
     ctx.font = "28px system-ui";
     ctx.fillText(
       `${model.name} · Q′=${fmt(result.heat.outgoing, 5)} Вт/м · Tsi,min=${fmt(result.heat.minSurface, 3)} °C`,
       40,
-      42,
+      2042,
+      2320,
     );
-    for (let x = 0; x < 2320; x++) {
-      ctx.fillStyle = `rgb(${ThermoPalette.color(min + ((max - min) * x) / 2319, min, max)})`;
-      ctx.fillRect(40 + x, 65, 1, 26);
-    }
+    if ($("show-scale").checked)
+      for (let x = 0; x < 2320; x++) {
+        ctx.fillStyle = `rgb(${ThermoPalette.color(min + ((max - min) * x) / 2319, min, max)})`;
+        ctx.fillRect(40 + x, 2065, 1, 26);
+      }
     ctx.fillStyle = "#18383d";
     ctx.font = "23px system-ui";
-    for (let i = 0; i <= 8; i++) {
-      ctx.textAlign = i === 8 ? "right" : i === 0 ? "left" : "center";
-      ctx.fillText(
-        `${fmt(min + ((max - min) * i) / 8, 1)} °C`,
-        40 + (2320 * i) / 8,
-        125,
-      );
-    }
+    if ($("show-scale").checked)
+      for (let i = 0; i <= 8; i++) {
+        ctx.textAlign = i === 8 ? "right" : i === 0 ? "left" : "center";
+        ctx.fillText(
+          `${fmt(min + ((max - min) * i) / 8, 1)} °C`,
+          40 + (2320 * i) / 8,
+          2125,
+        );
+      }
     ctx.textAlign = "left";
     ctx.font = "19px system-ui";
     ctx.fillText(
       `2D — непрерывное включение; ${result.stats.elements} треугольников; рёбра ${fmt(result.stats.minEdge, 4)}…${fmt(result.stats.maxEdge, 2)} мм; баланс ${fmt(result.heat.balance * 100, 8)} %`,
       40,
-      163,
+      2163,
     );
-    canvas.toBlob((b) => download("Thermo2D-FEM.png", b));
-  };
+    if (format === "pdf") {
+      const encoded = canvas.toDataURL("image/jpeg", 0.95).split(",")[1];
+      const jpeg = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
+      const enc = new TextEncoder(),
+        chunks = [],
+        offsets = [0];
+      let length = 0;
+      const append = (v) => {
+        const bytes = typeof v === "string" ? enc.encode(v) : v;
+        chunks.push(bytes);
+        length += bytes.length;
+      };
+      const object = (id, body) => {
+        offsets[id] = length;
+        append(`${id} 0 obj\n${body}\nendobj\n`);
+      };
+      append("%PDF-1.4\n");
+      object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+      object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+      object(
+        3,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+      );
+      offsets[4] = length;
+      append(
+        `4 0 obj\n<< /Type /XObject /Subtype /Image /Width ${canvas.width} /Height ${canvas.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
+      );
+      append(jpeg);
+      append("\nendstream\nendobj\n");
+      const height = 565,
+        width = (height * canvas.width) / canvas.height;
+      const content = `q ${width} 0 0 ${height} ${(842 - width) / 2} 15 cm /Im0 Do Q`;
+      object(
+        5,
+        `<< /Length ${enc.encode(content).length} >>\nstream\n${content}\nendstream`,
+      );
+      const xref = length;
+      append("xref\n0 6\n0000000000 65535 f \n");
+      for (let i = 1; i <= 5; i++)
+        append(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+      append(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+      download(
+        "Thermo2D-FEM.pdf",
+        new Blob(chunks, { type: "application/pdf" }),
+      );
+    } else
+      canvas.toBlob(
+        (b) =>
+          b && download(`Thermo2D-FEM.${format === "jpeg" ? "jpg" : "png"}`, b),
+        format === "jpeg" ? "image/jpeg" : "image/png",
+        0.95,
+      );
+  }
+  $("export-image").onclick = () => exportImage();
+  $("export-jpeg").onclick = () => exportImage("jpeg");
+  $("export-pdf").onclick = () => exportImage("pdf");
   $("result-choice").onchange = () => {
     show(results[+$("result-choice").value]);
     controls();
   };
   for (const id of [
+    "show-result",
+    "show-scale",
+    "boundary-medium",
+    "show-overlay",
+    "overlay-opacity",
     "mesh",
     "flux",
     "iso",
@@ -987,7 +1229,8 @@
     "scale-max",
   ])
     $(id).oninput = schedule;
-  for (const id of ["base", "minimum"]) $(id).oninput = invalidate;
+  for (const id of ["base", "minimum", "unlimited-mesh"])
+    $(id).oninput = invalidate;
   for (const id of ["target-q", "target-t"]) $(id).oninput = studyTable;
   $("fit").onclick = () => {
     zoom = 1;
@@ -1022,20 +1265,67 @@
         $("edge-info").textContent = selectedEdge
           ? `Грань ${fmt(Math.hypot(selectedEdge.b.x - selectedEdge.a.x, selectedEdge.b.y - selectedEdge.a.y), 2)} мм`
           : "Внешняя грань не найдена";
+        if (selectedEdge) {
+          const mid = {
+            x: (selectedEdge.a.x + selectedEdge.b.x) / 2,
+            y: (selectedEdge.a.y + selectedEdge.b.y) / 2,
+          };
+          const bc = (model.boundaries || []).find(
+            (b) => ThermoEdges.distance(mid, b.a, b.b) < 1e-6,
+          );
+          if (bc) {
+            $("edge-temperature").value = bc.temperature;
+            $("edge-type").value = bc.type === "film" ? "film" : "temperature";
+            $("edge-h").value = bc.h || 7.6923076923;
+            $("edge-interior").checked = !!bc.interior;
+          }
+        }
         schedule();
         return;
       }
-      drag = { x: e.clientX, y: e.clientY };
+      drag = {
+        x: e.clientX,
+        y: e.clientY,
+        startX: e.clientX,
+        startY: e.clientY,
+        moved: false,
+      };
       canvas.setPointerCapture(e.pointerId);
     };
-    canvas.onpointerup = () => (drag = null);
+    canvas.onpointerup = (e) => {
+      if (drag && !drag.moved) {
+        const box = canvas.getBoundingClientRect(),
+          v = view(canvas.width, canvas.height);
+        const p = {
+          x: (((e.clientX - box.left) * canvas.width) / box.width - v.x) / v.s,
+          y: (v.y - ((e.clientY - box.top) * canvas.height) / box.height) / v.s,
+        };
+        selectedRegion = model.regions.findIndex(
+          (r) =>
+            inside(p, r.points) && !(r.holes || []).some((h) => inside(p, h)),
+        );
+        if (selectedRegion >= 0) {
+          $("region-choice").value = selectedRegion;
+          syncRegion();
+        } else selectedRegion = null;
+        schedule();
+      }
+      drag = null;
+    };
     canvas.onpointercancel = () => (drag = null);
     canvas.onpointermove = (e) => {
       const box = canvas.getBoundingClientRect();
       if (drag) {
         pan.x += (e.clientX - drag.x) / box.width;
         pan.y += (e.clientY - drag.y) / box.height;
-        drag = { x: e.clientX, y: e.clientY };
+        drag = {
+          ...drag,
+          x: e.clientX,
+          y: e.clientY,
+          moved:
+            drag.moved ||
+            Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4,
+        };
         schedule();
         return;
       }
@@ -1076,5 +1366,7 @@
     }
   }
   controls();
-  draw();
+  schedule();
+  window.addEventListener("load", schedule);
+  new ResizeObserver(schedule).observe($("temperature"));
 })();
