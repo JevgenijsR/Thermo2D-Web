@@ -244,6 +244,7 @@
   }
   function select() {
     overlay = null;
+    $("overlay-file").value = "";
     selectedRegion = null;
     invalidate();
     if (["hole", "solid"].includes($("example").value)) {
@@ -653,7 +654,7 @@
       h.rows
         .map(
           (row) =>
-            `<tr><td>${esc(row.name)}</td><td>${fmt(row.outward, 6)}</td><td>${fmt(row.length, 4)}</td></tr>`,
+            `<tr><td>${esc(row.name)}</td><td>${fmt(row.outward, 6)}</td><td>${fmt(row.length ?? null, 4)}</td></tr>`,
         )
         .join("") +
       "</table>" +
@@ -843,6 +844,7 @@
       m.userEdited = true;
       model = m;
       overlay = null;
+      $("overlay-file").value = "";
       selectedRegion = null;
       $("example").value = "custom";
       invalidate();
@@ -905,6 +907,7 @@
       ThermoFEM.validate(next);
       model = next;
       overlay = null;
+      $("overlay-file").value = "";
       selectedRegion = null;
       changed();
       zoom = 1;
@@ -1005,6 +1008,7 @@
       model = next;
       model.name = file.name;
       overlay = null;
+      $("overlay-file").value = "";
       selectedRegion = null;
       const saved = saveImportedModel();
       zoom = 1;
