@@ -1,4 +1,4 @@
-importScripts("fem-solver.js?v=20261027-4", "fem-examples.js?v=20261026-2");
+importScripts("fem-solver.js?v=20261029-2", "fem-examples.js?v=20261026-2");
 onmessage = ({ data }) => {
   try {
     let completed = 0;

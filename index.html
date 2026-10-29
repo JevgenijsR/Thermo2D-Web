@@ -4,39 +4,15 @@
     name="viewport"
     content="width=device-width,initial-scale=1"
   /><title>Thermo2D · Треугольный расчёт</title
-  ><link rel="stylesheet" href="fem.css?v=20261027-4" />
+  ><link rel="stylesheet" href="fem.css?v=20261029-2" />
   <header>
     <a href="./">T2 / Thermo2D</a
     ><span>Треугольная сетка · стационарный FEM</span
-    ><small>Расчёт в вашем браузере</small>
+    ><small>Thermo2D</small>
   </header>
   <main>
     <aside>
-      <h1>Детали имеют значение</h1>
-      <p>Геометрия → сетка → проверка → температурное поле.</p>
-      <details>
-        <summary>Как начать новый узел</summary>
-        <ol>
-          <li>Загрузите ниже плоский DXF в XY, Z=0, или сохранённый JSON.</li>
-          <li>
-            В «Материалы контуров» назначьте материал каждой области. Внутреннюю
-            пустоту удалите из списка областей.
-          </li>
-          <li>
-            Включите «Выбрать грань», щёлкните контур, введите температуру и
-            нажмите «Задать T». Повторите для другой стороны.
-          </li>
-          <li>
-            Для воздуха измените тип условия на «Воздух + h» в таблице и задайте
-            h. Отметьте внутренние грани для расчёта Tsi,min. Нажмите «Применить
-            параметры».
-          </li>
-          <li>
-            Рассчитайте и проверьте сходимость на трёх сетках. Скачайте JSON для
-            переноса и резервной копии.
-          </li>
-        </ol>
-      </details>
+      <label>Название узла<input id="node-name" placeholder="Узел №…" /></label>
       <h2>Загрузка нового узла</h2>
       <label
         >Единицы DXF<select id="dxf-units">
@@ -47,15 +23,11 @@
           <option value="in">дюймы</option>
         </select></label
       >
-      <label
-        >Импорт узла DXF<input id="import-dxf" type="file" accept=".dxf"
-      /></label>
-      <label
-        >Загрузить модель<input id="import" type="file" accept=".json"
-      /></label>
+      <label>Импорт узла<input id="import" type="file" accept=".dxf,.json" /></label>
+      <input id="import-dxf" type="file" hidden />
       <details open>
         <summary>Свои узлы</summary>
-        <button id="save-browser-model" class="secondary">
+        <button id="save-browser-model" class="secondary" hidden>
           Сохранить узел в этом браузере
         </button>
         <label>Свои узлы<select id="saved-model-choice"></select></label>
@@ -75,15 +47,38 @@
             <option value="custom">Моя модель из редактора / JSON</option>
           </select></label
         >
-        <p id="description" class="description"></p>
+        <button id="load-example" class="secondary">Загрузить узел</button><p id="description" class="description"></p>
         <p class="note">
           Сейчас здесь проверочные примеры. Стандартные строительные узлы с
           анализом добавим позже.
         </p>
       </details>
+      <details>
+        <summary>Как начать новый узел</summary>
+        <ol>
+          <li>Загрузите ниже плоский DXF в XY, Z=0, или сохранённый JSON.</li>
+          <li>
+            В «Материалы контуров» назначьте материал каждой области. Внутреннюю
+            вложенные полости нового DXF получают воздух; при необходимости замените его.
+          </li>
+          <li>
+            Щёлкните внешнюю грань, введите температуру и
+            нажмите «Задать T». Повторите для другой стороны.
+          </li>
+          <li>
+            Для воздуха измените тип условия на «Воздух + h» в таблице и задайте
+            h. Отметьте внутренние грани для расчёта Tsi,min. Нажмите «Применить
+            параметры».
+          </li>
+          <li>
+            Рассчитайте и проверьте сходимость на трёх сетках. Скачайте JSON для
+            переноса и резервной копии.
+          </li>
+        </ol>
+      </details>
       <h2>Температуры на гранях</h2>
       <div class="edge-tools">
-        <label><input id="pick-edge" type="checkbox" /> Выбрать грань</label>
+        <input id="pick-edge" type="checkbox" checked hidden />
         <input
           id="edge-temperature"
           type="number"
@@ -92,9 +87,9 @@
         />
         <button id="set-edge" class="secondary">Задать T, °C</button
         ><button id="clear-edge" class="secondary">
-          Без теплообмена (q = 0)
+          Снять температуру
         </button>
-        <label
+        <details><summary>Условия теплообмена</summary><label>Куда передаётся тепло<select id="edge-role"><option value="">Не задано</option><option value="room">Комната</option><option value="outside">Улица</option><option value="ground">Нижняя граница грунта</option></select></label><label
           >Тип условия<select id="edge-type">
             <option value="temperature">Температура поверхности</option>
             <option value="film">Температура воздуха</option>
@@ -109,16 +104,15 @@
         ><label
           ><input id="edge-interior" type="checkbox" /> Внутренняя
           поверхность</label
-        ><span id="edge-info">Грань не выбрана</span>
+        ></details><div id="temperature-tags" class="tags"></div><span id="edge-info">Грань не выбрана</span>
       </div>
       <p class="note">
-        Без теплообмена — тепло не проходит через грань. Это не слой утеплителя.
-        Неназначенные грани имеют это условие.
+        Ctrl — выбор нескольких граней. Неназначенные грани не пропускают тепло.
       </p>
       <details>
-        <summary>Граничные условия</summary>
+        <summary>Подробнее о теплообмене</summary>
         <p class="note">
-          h — теплоотдача воздуха, Вт/(м²·К). «Внутри» отмечает поверхность для
+          Температура поверхности фиксирует T. Температура воздуха учитывает сопротивление теплоотдачи h на границе, а не свойство материала. «Внутри» отмечает поверхность для
           поиска минимальной внутренней температуры.
         </p>
         <div id="boundary-controls"></div>
@@ -128,18 +122,11 @@
       </details>
       <details open>
         <summary>Материалы контуров</summary>
-        <p class="note">
-          λ — Вт/(м·К), ρ — кг/м³, c — Дж/(кг·К). ρ и c справочные, стационарный
-          расчёт использует λ. Начальные значения уточняйте по паспорту.
-        </p>
-        <p class="note">
-          Щёлкните внутри контура на узле, затем назначьте материал.
-        </p>
-        <label>Выбранный контур<select id="region-choice"></select></label>
+        <label hidden>Выбранный контур<select id="region-choice"></select></label>
         <label
           >Материал из библиотеки<select id="catalog-choice"></select
         ></label>
-        <p id="catalog-note" class="note"></p>
+        <div id="material-tags" class="tags"></div><p id="catalog-note" class="note"></p>
         <details>
           <summary>Добавить свой материал</summary>
           <label
@@ -173,14 +160,15 @@
             Сохранить материал в этом браузере
           </button>
         </details>
-        <button id="assign-catalog" class="secondary">
+        <button id="assign-catalog" class="secondary" hidden>
           Назначить материал
         </button>
-        <button id="make-hole" class="secondary">
+        <button id="make-hole" class="secondary" hidden>
           Удалить область → отверстие / пустота
         </button>
+        <h3>Температурный контур</h3><label>Библиотека температур<select id="temperature-choice"></select></label><label>Название<input id="temperature-name" /></label>
         <label
-          >Режим контура<select id="region-mode">
+          >Действие<select id="region-mode">
             <option value="conductive">Обычный материал</option>
             <option value="temperature">Постоянная температура</option>
           </select></label
@@ -192,8 +180,8 @@
             value="30"
             step="any"
         /></label>
-        <button id="apply-region-temperature" class="secondary">
-          Применить режим контура
+        <div id="region-temperature-tags" class="tags"></div><button id="apply-region-temperature" class="secondary">
+          Назначить температуру контуру
         </button>
         <p class="note">
           Постоянная температура поддерживается во всей области внешним
@@ -206,28 +194,27 @@
         </details>
         <p class="note">
           Температура поверхности — фиксированное T. Воздух — T и h, Вт/(м²·К).
-          Неназначенные грани изолированы. Полости и контактные сопротивления не
-          моделируются.
+          Неназначенные грани изолированы. Воздух в полости учитывает только теплопроводность; конвекция и излучение пока не рассчитываются.
         </p>
         <button id="apply" class="secondary">Применить параметры</button>
       </details>
       <h2>Сетка и расчёт</h2>
       <label
         >Тип сетки<select id="mesh-type">
-          <option value="triangles">Треугольная · адаптивное сгущение</option>
-          <option disabled>Прямоугольная · в разработке</option>
+          <option value="triangles">Регулярные треугольники · адаптивное сгущение</option>
+          <option disabled>Нерегулярные треугольники · следующий этап</option>
         </select></label
       >
       <div class="pair">
         <label
-          >Размер вдали от деталей, мм<input
+          >Макс., мм<input
             id="base"
             type="number"
             value="20"
             min=".000001"
             step="any" /></label
         ><label
-          >Размер у деталей, мм<input
+          >Мин., мм<input
             id="minimum"
             type="number"
             value=".8"
@@ -240,7 +227,14 @@
         не точные длины всех рёбер. Локальный размер задаётся для каждого
         контура. Точность проверяйте сравнением сеток.
       </p>
-      <div class="pair">
+      <p id="status" role="status">
+        Готов к расчёту. Размеры контрольного узла — тестовые.
+      </p>
+      <button id="run">Рассчитать термоанализ</button
+      ><details><summary>Проверка расчёта</summary><button id="study" class="secondary">
+        Сравнить металл / без · 3 сетки</button
+      ><button id="cancel" class="secondary" disabled>Отменить расчёт</button>
+      <details><summary>Проверка точности и ограничения</summary>      <div class="pair">
         <label
           >Порог ΔQ′, %<input
             id="target-q"
@@ -258,7 +252,7 @@
         /></label>
       </div>
       <label
-        ><input id="unlimited-mesh" type="checkbox" /> Без программного лимита
+        ><input id="unlimited-mesh" type="checkbox" checked /> Без программного лимита
         числа элементов</label
       >
       <p class="note">
@@ -266,17 +260,13 @@
         лимита объём задачи ограничивается памятью компьютера; расчёт можно
         отменить.
       </p>
-      <button id="run">Рассчитать узел</button
-      ><button id="study" class="secondary">
-        Сравнить металл / без · 3 сетки</button
-      ><button id="cancel" class="secondary" disabled>Отменить расчёт</button>
+</details>
       <button id="adapt" class="secondary" disabled>
         Уточнить локально по потокам
       </button>
-      <p id="status" role="status">
-        Готов к расчёту. Размеры контрольного узла — тестовые.
-      </p>
-      <details>
+
+</details>
+      <details hidden>
         <summary>Дополнительно: геометрия JSON</summary>
         <p class="note">
           LINE и LWPOLYLINE, замкнутые контуры. Кривые, блоки и неподдерживаемые
@@ -413,8 +403,8 @@
   <script src="material-catalog.js?v=20261027-2"></script>
   <script src="temperature-palette.js?v=20261026-2"></script>
   <script src="fem-examples.js?v=20261026-hole"></script>
-  <script src="fem-solver.js?v=20261027-4"></script>
+  <script src="fem-solver.js?v=20261029-2"></script>
   <script src="fem-edges.js?v=20261027-2"></script>
   <script src="dxf-import.js?v=20261027-2"></script>
-  <script src="fem-view.js?v=20261028-1"></script>
+  <script src="fem-view.js?v=20261029-2"></script>
 </html>

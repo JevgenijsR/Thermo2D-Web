@@ -354,3 +354,10 @@ aside h2 {
   padding: 0 16px;
   min-height: 18px;
 }
+
+[hidden] { display:none !important; }
+.pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; }
+.pair label { min-width:0; }
+.tags { display:flex; flex-direction:column; gap:5px; margin:8px 0; }
+.tags button { text-align:left; padding:6px 9px; }
+#status:empty { display:none; }

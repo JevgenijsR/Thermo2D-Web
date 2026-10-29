@@ -605,6 +605,7 @@
           }
       const row = byIndex.get(e.index) || {
         name: e.bc.name || `Грань ${e.index + 1}`,
+        boundaryIndex: e.index,
         outward: 0,
         length: 0,
       };

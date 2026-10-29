@@ -23,6 +23,8 @@
       return ThermoMaterials;
     }
   })();
+  let activeSavedIndex = null;
+  const selectedRegions = new Set(), selectedEdges = [];
   let selectedEdge = null,
     selectedRegion = null,
     overlay = null;
@@ -90,7 +92,7 @@
     $("region-mode").value =
       r.temperature === undefined ? "conductive" : "temperature";
     $("region-temperature").value = r.temperature ?? 30;
-    $("region-temperature").disabled = r.temperature === undefined;
+    $("region-temperature").disabled = false;
     const xs = r.points.map((p) => p.x),
       ys = r.points.map((p) => p.y);
     $("region-info").textContent =
@@ -104,18 +106,28 @@
   $("region-mode").onchange = () => {
     $("region-temperature").disabled = $("region-mode").value !== "temperature";
   };
+  function temperatureLibrary() {
+    const items=JSON.parse(localStorage.getItem("thermo2d.temperature-library.v1")||"[]");
+    if(!Array.isArray(items)) throw Error("Неверный формат библиотеки температур");
+    return items;
+  }
+  function temperatureChoices() {
+    try { $("temperature-choice").replaceChildren(new Option("Выбрать температуру", ""), ...temperatureLibrary().map((t,i)=>new Option(`${t.name} · ${t.temperature} °C`,i))); }
+    catch(e) { $("status").textContent=e.message; }
+  }
+  $("temperature-choice").onchange=()=>{ if($("temperature-choice").value==='')return; const t=temperatureLibrary()[+$("temperature-choice").value]; $("temperature-name").value=t.name; $("region-temperature").value=t.temperature; $("region-mode").value='temperature'; $("apply-region-temperature").click(); };
   $("apply-region-temperature").onclick = () => {
-    const r = model.regions[+$("region-choice").value];
-    if (!r) return;
-    if ($("region-mode").value === "temperature") {
-      const t = +$("region-temperature").value;
-      if ($("region-temperature").value === "" || !Number.isFinite(t)) {
-        $("status").textContent = "Введите температуру контура.";
-        return;
+    if(!selectedRegions.size) { $("status").textContent="Выберите контур на рисунке."; return; }
+    const t=+$("region-temperature").value;
+    if($("region-temperature").value==='' || !Number.isFinite(t)) return;
+    try {
+      if($("region-mode").value==='temperature') {
+        const name=$("temperature-name").value.trim() || `${t} °C`, list=temperatureLibrary();
+        if(!list.some(x=>x.name===name && x.temperature===t)) {list.push({name,temperature:t}); localStorage.setItem("thermo2d.temperature-library.v1",JSON.stringify(list));}
       }
-      r.temperature = t;
-    } else delete r.temperature;
-    changed();
+      for(const i of selectedRegions) { if($("region-mode").value==='temperature') model.regions[i].temperature=t; else delete model.regions[i].temperature; }
+      changed(); temperatureChoices();
+    } catch(e) { $("status").textContent=e.message; }
   };
   $("overlay-file").onchange = async (e) => {
     const f = e.target.files[0];
@@ -173,10 +185,12 @@
     $("example").value = "custom";
     invalidate();
     controls();
+    autoSave();
     draw();
   }
   function controls() {
-    selectedEdge = null;
+    $("node-name").value = model.name || "";
+    renderTags();
     $("edge-info").textContent = "Грань не выбрана";
     const regionChoice = $("region-choice").value;
     $("region-choice").replaceChildren(
@@ -220,11 +234,11 @@
         .join("") +
       "</table>";
     $("boundary-controls").innerHTML =
-      "<h3>Граничные условия</h3><table><tr><th>Грань</th><th>Тип</th><th>T, °C</th><th>h</th><th>Внутри</th></tr>" +
+      "<h3>Граничные условия</h3><table><tr><th>Грань</th><th>Тип</th><th>T, °C</th><th>h</th><th>Внутри</th><th>Куда</th></tr>" +
       (model.boundaries || [])
         .map(
           (b, i) =>
-            `<tr><td>${esc(b.name || i)}</td><td><select data-boundary="${i}" data-prop="type"><option value="temperature" ${b.type !== "film" ? "selected" : ""}>Поверхность</option><option value="film" ${b.type === "film" ? "selected" : ""}>Воздух + h</option></select></td><td><input data-boundary="${i}" data-prop="temperature" type="number" value="${b.temperature}"></td><td><input data-boundary="${i}" data-prop="h" type="number" min=".001" value="${b.h ?? ""}"></td><td><input aria-label="Внутренняя поверхность ${esc(b.name || i)}" data-boundary="${i}" data-prop="interior" type="checkbox" ${b.interior ? "checked" : ""}></td></tr>`,
+            `<tr><td>${esc(b.name || i)}</td><td><select data-boundary="${i}" data-prop="type"><option value="temperature" ${b.type !== "film" ? "selected" : ""}>Поверхность</option><option value="film" ${b.type === "film" ? "selected" : ""}>Воздух + h</option></select></td><td><input data-boundary="${i}" data-prop="temperature" type="number" value="${b.temperature}"></td><td><input data-boundary="${i}" data-prop="h" type="number" min=".001" value="${b.h ?? ""}"></td><td><input aria-label="Внутренняя поверхность ${esc(b.name || i)}" data-boundary="${i}" data-prop="interior" type="checkbox" ${b.interior ? "checked" : ""}></td><td><select data-boundary="${i}" data-prop="role">${[ ["","Не задано"],["room","Комната"],["outside","Улица"],["ground","Низ грунта"] ].map(([v,label])=>`<option value="${v}" ${b.role===v?"selected":""}>${label}</option>`).join("")}</select></td></tr>`,
         )
         .join("") +
       "</table>";
@@ -272,7 +286,7 @@
         const p = e.dataset.prop;
         if (e.type === "checkbox") o[p] = e.checked;
         else if (e.value === "") delete o[p];
-        else o[p] = p === "type" ? e.value : Number(e.value);
+        else o[p] = ["type","role"].includes(p) ? e.value : Number(e.value);
       }
       ThermoFEM.validate(next);
       model = next;
@@ -392,9 +406,9 @@
         ctx.fillStyle = r.color || colors[i % colors.length];
         ctx.fill("evenodd");
       }
-      ctx.strokeStyle = i === selectedRegion ? "#a000cc" : "#182529";
+      ctx.strokeStyle = (selectedRegions.has(i) || i === selectedRegion) ? "#a000cc" : "#182529";
       ctx.lineWidth =
-        i === selectedRegion
+        (selectedRegions.has(i) || i === selectedRegion)
           ? 3
           : exporting
             ? 1.3
@@ -543,9 +557,9 @@
       ctx.fillStyle = "#de2028";
       ctx.fillText(label, lx, ly);
     }
-    if (selectedEdge) {
-      const a = screen(selectedEdge.a, v),
-        b = screen(selectedEdge.b, v);
+    for (const edge of selectedEdges) {
+      const a = screen(edge.a, v),
+        b = screen(edge.b, v);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
@@ -616,7 +630,8 @@
   }
   function show(r) {
     result = r;
-    model = r.model;
+    model = structuredClone(r.model);
+    $("base").value=r.options.base; $("minimum").value=r.options.minimum; $("unlimited-mesh").checked=!!r.options.unlimited;
     $("example").value = model.userEdited
       ? "custom"
       : model.name === FEMExamples.windowNode(true).name
@@ -633,8 +648,23 @@
     $("description").textContent = model.description || model.name;
     const s = r.stats,
       h = r.heat;
+    const grouped = {room:0,outside:0,ground:0,other:0};
+    for(const row of h.rows) {
+      if(row.length==null)continue;
+      const bc=r.model.boundaries[row.boundaryIndex];
+      const role=bc?.role || (bc?.interior ? "room" : /^Улица · /.test(row.name) ? "outside" : row.name === "Грунт на глубине 1,5 м от наружной поверхности" ? "ground" : "other");
+      grouped[role in grouped ? role : "other"] += row.outward;
+    }
+    const floorFlow=h.rows.filter(row=>row.name==="Комната · поверхность пола").reduce((sum,row)=>sum+row.outward,0);
     $("metrics").innerHTML = [
-      ["Потери Q′, Вт/м", fmt(h.outgoing, 5)],
+      ...(h.rows.some(row=>row.name==="Комната · поверхность пола") ? [["Пол → комната, Вт/м",fmt(floorFlow,5)]] : []),
+      ["В комнату (+) / из комнаты (−), Вт/м",fmt(grouped.room,5)],
+      ["На улицу (+) / с улицы (−), Вт/м",fmt(grouped.outside,5)],
+      ["В низ грунта (+) / из грунта (−), Вт/м",fmt(grouped.ground,5)],
+      ["Прочие границы, Вт/м",fmt(grouped.other,5)],
+      ["Суммарный отток, Вт/м", fmt(h.outgoing, 5)],
+      ["Суммарный приток, Вт/м", fmt(h.incoming, 5)],
+      ["Источники: подвод (+) / отвод (−), Вт/м", fmt(-h.rows.filter(row=>row.length == null).reduce((sum,row)=>sum+row.outward,0),5)],
       ["Минимум внутри, °C", fmt(h.minSurface, 4)],
       ["Баланс мощности, %", fmt(h.balance * 100, 8)],
       [
@@ -650,7 +680,7 @@
       )
       .join("");
     $("heat-report").innerHTML =
-      `<p>Минимальный угол: ${fmt(s.minAngle, 2)}°. Невязка: ${s.residual.toExponential(2)} Вт/м. Минимум внутренней поверхности: ${h.minSurfacePoint ? `x=${fmt(h.minSurfacePoint.x)}, y=${fmt(h.minSurfacePoint.y)} мм` : "внутренняя поверхность не назначена"}.</p><table><tr><th>Грань</th><th>Наружу, Вт/м (− вход)</th><th>Длина, м</th></tr>` +
+      `<p>Суммарный отток включает тепло, переданное помещению; это не теплопотери здания. В таблице положительный поток выходит из модели, отрицательный поступает в неё.</p><p>Сетка выбранного результата: ${fmt(r.options?.baseSize ?? r.options?.base ?? null)} / ${fmt(r.options?.minSize ?? r.options?.minimum ?? null)} мм.</p><p>Минимальный угол: ${fmt(s.minAngle, 2)}°. Невязка: ${s.residual.toExponential(2)} Вт/м. Минимум внутренней поверхности: ${h.minSurfacePoint ? `x=${fmt(h.minSurfacePoint.x)}, y=${fmt(h.minSurfacePoint.y)} мм` : "внутренняя поверхность не назначена"}.</p><table><tr><th>Грань</th><th>Наружу, Вт/м (− вход)</th><th>Длина, м</th></tr>` +
       h.rows
         .map(
           (row) =>
@@ -700,6 +730,7 @@
       "</table>";
   }
   function run(study = false, adaptive = false) {
+    $("example").value = model.userEdited ? "custom" : loadedExample;
     if (model.regions.some((r) => r.materialPending)) {
       $("status").textContent =
         "Назначьте материалы всем импортированным областям.";
@@ -769,7 +800,7 @@
     if (!study && !adaptive && ["steel", "wood"].includes($("example").value))
       jobs[0].model.regions[6].h = minimum;
     const id = revision;
-    worker = new Worker("fem-worker.js?v=20261027-4");
+    worker = new Worker("fem-worker.js?v=20261029-2");
     $("status").textContent = "Строю сетку…";
     worker.onmessage = ({ data }) => {
       if (data.id !== revision) return;
@@ -826,7 +857,9 @@
       new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
     );
   }
-  $("example").onchange = select;
+  let loadedExample = $("example").value;
+  $("example").onchange=()=>{ $("load-example").dataset.choice=$("example").value; };
+  $("load-example").onclick = () => { activeSavedIndex = null; selectedRegions.clear(); selectedEdges.length = 0; select(); loadedExample=$("example").value; autoSave(); };
   $("run").onclick = () => run();
   $("study").onclick = () => run(true);
   $("cancel").onclick = () => {
@@ -858,21 +891,33 @@
     if (!Array.isArray(v)) throw Error("Неверный формат сохранённых FEM-узлов");
     return v;
   }
-  function saveImportedModel() {
+  function autoSave() {
     try {
       const saved = savedModels();
-      saved.push({
-        name: `${model.name || "Загруженный узел"} · ${new Date().toLocaleString("ru-RU")}`,
-        model: structuredClone(model),
-      });
+      const key = "thermo2d.fem-nodes.before-autosave.v1";
+      if (localStorage.getItem(key) === null)
+        localStorage.setItem(key, localStorage.getItem("thermo2d.fem-nodes.v1") || "[]");
+      if (activeSavedIndex === null) activeSavedIndex = saved.length;
+      model.name = model.name?.trim() || `Узел №${activeSavedIndex + 1}`;
+      saved[activeSavedIndex] = { ...saved[activeSavedIndex], name: model.name, model: structuredClone(model), meshOptions: {base:+$("base").value,minimum:+$("minimum").value,unlimited:$("unlimited-mesh").checked} };
       localStorage.setItem("thermo2d.fem-nodes.v1", JSON.stringify(saved));
       savedModelChoices();
+      $("saved-model-choice").value = activeSavedIndex;
       return true;
-    } catch (e) {
-      $("status").textContent =
-        "Узел открыт, но не сохранён в браузере: " + e.message;
-      return false;
-    }
+    } catch (e) { $("status").textContent = "Не удалось сохранить узел: " + e.message; return false; }
+  }
+  function saveImportedModel() { activeSavedIndex = null; return autoSave(); }
+  $("node-name").oninput = () => { model.name = $("node-name").value; model.userEdited=true; autoSave(); };
+  function renderTags() {
+    const tags = (id, values, label, action) => {
+      $(id).replaceChildren(...values.map(v => { const b = document.createElement("button"); b.className="secondary"; b.textContent=label(v); b.onclick=()=>action(v); return b; }));
+    };
+    const temperatures=[...new Set(model.regions.filter(r=>r.temperature!==undefined).map(r=>r.temperature))];
+    tags("region-temperature-tags",temperatures,t=>`${t} °C`,t=>{ $("region-mode").value="temperature"; $("region-temperature").value=t; $("apply-region-temperature").click(); });
+    const materials = [...new Set(model.regions.map(r=>r.materialId))].map(id=>catalog.find(m=>m.id===id)).filter(Boolean);
+    tags("material-tags", materials, m=>m.name, m=>{ $("catalog-choice").value=m.id; $("assign-catalog").click(); });
+    const conditions = [...new Map((model.boundaries||[]).map(b=>[JSON.stringify([b.temperature,b.type,b.h,b.interior,b.role]),b])).values()];
+    tags("temperature-tags", conditions, b=>`${b.temperature} °C · ${b.type==='film'?'воздух':'поверхность'}`, b=>{ $("edge-temperature").value=b.temperature; $("edge-type").value=b.type||"temperature"; $("edge-h").value=b.h||7.6923076923; $("edge-interior").checked=!!b.interior; $("edge-role").value=b.role||""; setEdges(); });
   }
   function savedModelChoices() {
     try {
@@ -904,7 +949,10 @@
       const saved = savedModels()[+$("saved-model-choice").value];
       if (!saved) return;
       const next = structuredClone(saved.model);
+      if(saved.meshOptions) { $("base").value=saved.meshOptions.base; $("minimum").value=saved.meshOptions.minimum; $("unlimited-mesh").checked=!!saved.meshOptions.unlimited; }
       ThermoFEM.validate(next);
+      activeSavedIndex = +$("saved-model-choice").value;
+      selectedRegions.clear(); selectedEdges.length = 0;
       model = next;
       overlay = null;
       $("overlay-file").value = "";
@@ -967,11 +1015,12 @@
       $("status").textContent = e.message;
     }
   };
-  $("catalog-choice").onchange = catalogNote;
+  $("catalog-choice").onchange = () => { catalogNote(); $("assign-catalog").click(); };
   $("assign-catalog").onclick = () => {
-    const r = model.regions[+$("region-choice").value],
-      m = catalog.find((m) => m.id === $("catalog-choice").value);
-    if (!r || !m) return;
+    const m = catalog.find((m) => m.id === $("catalog-choice").value);
+    if (!m || !selectedRegions.size) return;
+    for (const index of selectedRegions) {
+    const r = model.regions[index];
     Object.assign(r, {
       lambda: m.lambda,
       color: m.color,
@@ -983,6 +1032,7 @@
       materialSource: m.source,
     });
     delete r.materialPending;
+    }
     changed();
   };
   $("make-hole").onclick = () => {
@@ -1022,8 +1072,7 @@
   };
   function setEdge(clear = false) {
     if (!selectedEdge) {
-      $("status").textContent =
-        "Включите «Выбрать грань» и щёлкните внешний контур.";
+      $("status").textContent = "Выберите внешнюю грань на рисунке.";
       return;
     }
     const temperature = +$("edge-temperature").value;
@@ -1072,23 +1121,37 @@
         type: $("edge-type").value,
         h: +$("edge-h").value,
         interior: $("edge-interior").checked,
+        role: $("edge-role").value,
         temperature,
       });
     model.boundaries = retained;
     changed();
   }
-  $("set-edge").onclick = () => setEdge();
-  $("clear-edge").onclick = () => setEdge(true);
+  function setEdges(clear=false) { for (const edge of [...selectedEdges]) { selectedEdge=edge; setEdge(clear); } }
+  $("set-edge").onclick = () => setEdges();
+  $("clear-edge").onclick = () => setEdges(true);
+  $("edge-type").onchange=()=>{ $("edge-h").closest("label").hidden=$("edge-type").value!=="film"; };
+  $("edge-type").onchange();
   $("import").onchange = async (e) => {
     try {
-      $("model-json").value = await e.target.files[0].text();
-      const parsed = JSON.parse($("model-json").value);
-      ThermoFEM.validate(parsed);
-      $("apply-json").click();
-      saveImportedModel();
-    } catch (e) {
-      $("status").textContent = e.message;
-    }
+      const file=e.target.files[0]; if (!file) return;
+      const text=await file.text();
+      const next=file.name.toLowerCase().endsWith('.dxf') ? ThermoDXF.importModel(text,$("dxf-units").value) : JSON.parse(text);
+      if(file.name.toLowerCase().endsWith('.dxf')) {
+        const air=catalog.find(m=>/воздух/i.test(m.name));
+        const ringKey=pts=>pts.map(p=>`${p.x.toFixed(6)},${p.y.toFixed(6)}`).sort().join(';');
+        const holes=new Set(next.regions.flatMap(r=>(r.holes||[]).map(ringKey)));
+        if(air) for(const r of next.regions) if(r.materialPending && holes.has(ringKey(r.points))) {
+          Object.assign(r,{lambda:air.lambda,color:air.color,materialId:air.id,materialName:air.name,materialNote:"Автоматически назначено воздуху полости; только теплопроводность"}); delete r.materialPending;
+        }
+      }
+      ThermoFEM.validate(next);
+      model=next; model.name=$("node-name").value.trim(); model.userEdited=true;
+      selectedRegions.clear(); selectedEdges.length=0; selectedRegion=null; selectedEdge=null;
+      overlay=null; $("overlay-file").value=""; activeSavedIndex=null;
+      zoom=1; pan={x:0,y:0}; changed();
+    } catch(e) { $("status").textContent=e.message; }
+    e.target.value="";
   };
   $("download-model").onclick = $("save-model").onclick = () =>
     jsonDownload("Thermo2D-FEM-model.json", model);
@@ -1130,7 +1193,7 @@
     ctx.fillStyle = "#18383d";
     ctx.font = "28px system-ui";
     ctx.fillText(
-      `${model.name} · Q′=${fmt(result.heat.outgoing, 5)} Вт/м · Tsi,min=${fmt(result.heat.minSurface, 3)} °C`,
+      `${model.name} · Суммарный отток=${fmt(result.heat.outgoing, 5)} Вт/м · Tsi,min=${fmt(result.heat.minSurface, 3)} °C`,
       40,
       2042,
       2320,
@@ -1234,7 +1297,7 @@
   ])
     $(id).oninput = schedule;
   for (const id of ["base", "minimum", "unlimited-mesh"])
-    $(id).oninput = invalidate;
+    $(id).oninput = () => { invalidate(); if(activeSavedIndex!==null)autoSave(); };
   for (const id of ["target-q", "target-t"]) $(id).oninput = studyTable;
   $("fit").onclick = () => {
     zoom = 1;
@@ -1263,7 +1326,7 @@
             }))
             .sort((a, b) => a.d - b.d)[0];
         selectedEdge =
-          near && near.d * v.s < (14 * canvas.width) / box.width
+          near && near.d * v.s < (5 * canvas.width) / box.width
             ? near.edge
             : null;
         $("edge-info").textContent = selectedEdge
@@ -1282,10 +1345,15 @@
             $("edge-type").value = bc.type === "film" ? "film" : "temperature";
             $("edge-h").value = bc.h || 7.6923076923;
             $("edge-interior").checked = !!bc.interior;
+            $("edge-role").value = bc.role || "";
           }
         }
-        schedule();
-        return;
+        if (selectedEdge) {
+          if (!e.ctrlKey) { selectedEdges.length=0; selectedRegions.clear(); selectedRegion=null; }
+          const i=selectedEdges.findIndex(x=>JSON.stringify(x)===JSON.stringify(selectedEdge));
+          if(i>=0) selectedEdges.splice(i,1); else selectedEdges.push(selectedEdge);
+          schedule(); return;
+        }
       }
       drag = {
         x: e.clientX,
@@ -1308,7 +1376,9 @@
           (r) =>
             inside(p, r.points) && !(r.holes || []).some((h) => inside(p, h)),
         );
+        if (!e.ctrlKey) { selectedRegions.clear(); selectedEdges.length=0; }
         if (selectedRegion >= 0) {
+          if(selectedRegions.has(selectedRegion)) { selectedRegions.delete(selectedRegion); selectedRegion=null; schedule(); drag=null; return; } else selectedRegions.add(selectedRegion);
           $("region-choice").value = selectedRegion;
           syncRegion();
         } else selectedRegion = null;
@@ -1369,7 +1439,9 @@
       $("status").textContent = e.message;
     }
   }
+  temperatureChoices();
   controls();
+  $("status").textContent="";
   schedule();
   window.addEventListener("load", schedule);
   new ResizeObserver(schedule).observe($("temperature"));
