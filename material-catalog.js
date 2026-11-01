@@ -344,7 +344,98 @@
       source: "",
       lambda: 1,
     },
+    // ISO 13370, табл. 1 (СВЕРИТЬ): λ и объёмная теплоёмкость ρc; ρ и c по отдельности не нормируются.
+    {
+      id: "builtin-ground-clay",
+      name: "Глина или суглинок (ISO 13370)",
+      category: "Грунт",
+      density: null,
+      heatCapacity: null,
+      color: "#c9b48f",
+      hatch: "solid",
+      note: "ISO 13370, табл. 1: λ = 1,5 Вт/(м·К), ρc = 3,0 МДж/(м³·К), глубина проникания годовой волны δ ≈ 2,2 м. Сверить с текстом стандарта.",
+      source: "EN ISO 13370, табл. 1",
+      lambda: 1.5,
+    },
+    {
+      id: "builtin-ground-sand",
+      name: "Песок или гравий (ISO 13370, по умолчанию)",
+      category: "Грунт",
+      density: null,
+      heatCapacity: null,
+      color: "#ddc99a",
+      hatch: "solid",
+      note: "ISO 13370, табл. 1: λ = 2,0 Вт/(м·К), ρc = 2,0 МДж/(м³·К), δ ≈ 3,2 м. Применяется, когда вид грунта неизвестен. Сверить с текстом стандарта.",
+      source: "EN ISO 13370, табл. 1",
+      lambda: 2.0,
+    },
+    {
+      id: "builtin-ground-rock",
+      name: "Однородная скала (ISO 13370)",
+      category: "Грунт",
+      density: null,
+      heatCapacity: null,
+      color: "#b3b0a8",
+      hatch: "solid",
+      note: "ISO 13370, табл. 1: λ = 3,5 Вт/(м·К), ρc = 2,0 МДж/(м³·К), δ ≈ 4,2 м. Сверить с текстом стандарта.",
+      source: "EN ISO 13370, табл. 1",
+      lambda: 3.5,
+    },
   ];
+  // μ — сопротивление паропроницанию, ориентир по EN ISO 10456 («сухая чашка»,
+  // где даны два значения). СВЕРИТЬ по декларации свойств. μ = ∞ (металлы,
+  // стекло) задано как 100 000: пар практически не проходит.
+  const mu = {
+    "builtin-concrete": 130,
+    "builtin-reinforced": 130,
+    "builtin-steel": 100000,
+    "builtin-stainless": 100000,
+    "builtin-aluminium": 100000,
+    "builtin-brick": 16,
+    "builtin-silicate": 20,
+    "builtin-wood": 50,
+    "builtin-wood-long": 50,
+    "builtin-aac400": 10,
+    "builtin-aac500": 10,
+    "builtin-aac600": 10,
+    "builtin-fibo3": 10,
+    "builtin-fibo5": 10,
+    "builtin-wool": 1,
+    "builtin-glasswool": 1,
+    "builtin-xps": 150,
+    "builtin-eps": 60,
+    "builtin-eps-grey": 60,
+    "builtin-pir": 60,
+    "builtin-bitumen": 50000,
+    "builtin-epdm": 6000,
+    "builtin-air": 1,
+    "builtin-screed": 20,
+    "builtin-plaster": 10,
+    "builtin-gypsum": 10,
+    "builtin-osb": 50,
+    "builtin-glass": 100000,
+    "builtin-pvc": 50000,
+    "builtin-foam": 60,
+    "builtin-tile": 200,
+    "builtin-ground-clay": 50,
+    "builtin-ground-sand": 50,
+    "builtin-ground-rock": 1000,
+  };
+  for (const m of items) {
+    m.mu = mu[m.id];
+    m.muSource = "Типовое значение (ориентир EN ISO 10456), проверить по декларации";
+  }
+  // Для расчёта во времени: ρc грунтов по ISO 13370, табл. 1 (СВЕРИТЬ);
+  // c блоков Fibo в каталоге не было — типовое значение 1000 Дж/(кг·К), проверить.
+  const rhoC = {
+    "builtin-ground-clay": 3.0e6,
+    "builtin-ground-sand": 2.0e6,
+    "builtin-ground-rock": 2.0e6,
+  };
+  for (const m of items) {
+    if (rhoC[m.id]) m.rhoC = rhoC[m.id];
+    if (/^builtin-fibo/.test(m.id) && !m.heatCapacity) m.heatCapacity = 1000;
+  }
   root.ThermoMaterials = items;
   if (typeof module !== "undefined") module.exports = items;
 })(globalThis);

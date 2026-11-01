@@ -24,11 +24,18 @@
     }
   })();
   let activeSavedIndex = null;
+  const sourceOf = new WeakMap();
+  // Animation (transient result): frames of nodal T, current position (fractional
+  // frame index) and the blended values shown for that position.
+  let anim = null,
+    animPos = 0,
+    animValues = null,
+    playing = false;
   const selectedRegions = new Set(), selectedEdges = [];
   let selectedEdge = null,
     selectedRegion = null,
     overlay = null;
-  let model = FEMExamples.windowNode(),
+  let model = prepare(FEMExamples.windowNode()),
     result = null,
     results = [],
     worker = null,
@@ -85,6 +92,21 @@
         hit = !hit;
     }
     return hit;
+  }
+  // Older models have no "Куда" (role). Fill it once on load so the flow summary
+  // uses the editable role, not boundary names; the user can correct it in the table.
+  // Missing μ, ρ, c, ρc are taken from the assigned catalog material, if it has them.
+  function prepare(m) {
+    for (const bc of m.boundaries || [])
+      if (bc.role === undefined)
+        bc.role = bc.interior
+          ? "room"
+          : /^Улица/.test(bc.name || "")
+            ? "outside"
+            : /^Грунт/.test(bc.name || "")
+              ? "ground"
+              : "";
+    return m;
   }
   function syncRegion() {
     const r = model.regions[+$("region-choice").value];
@@ -155,17 +177,19 @@
     revision++;
     worker?.terminate();
     worker = null;
-    $("run").disabled = $("study").disabled = false;
+    $("run").disabled = $("study").disabled = $("run-transient").disabled = false;
     $("cancel").disabled = true;
     $("adapt").disabled = !result;
   }
   function invalidate() {
     stop();
+    clearAnimation();
     result = null;
     $("adapt").disabled = true;
     results = [];
     $("result-choice").hidden = true;
     $("metrics").replaceChildren();
+    $("moisture-report").replaceChildren();
     $("heat-report").replaceChildren();
     $("convergence").replaceChildren();
     $("export-image").disabled = $("export-result").disabled = true;
@@ -175,7 +199,7 @@
   function catalogNote() {
     const m = catalog.find((m) => m.id === $("catalog-choice").value);
     $("catalog-note").textContent = m
-      ? `λ=${m.lambda}; ρ=${m.density ?? "—"}; c=${m.heatCapacity ?? "—"}. ${m.note || "Пользовательский материал"}`
+      ? `λ=${m.lambda}; ρ=${m.density ?? "—"}; c=${m.heatCapacity ?? "—"}; μ=${m.mu ?? "—"}${m.mu ? ` (${m.muSource || "задано пользователем"})` : ""}. ${m.note || "Пользовательский материал"}`
       : "";
   }
   function changed() {
@@ -190,6 +214,11 @@
   }
   function controls() {
     $("node-name").value = model.name || "";
+    const moisture = model.moisture || {};
+    $("moisture-on").checked = !!moisture.enabled;
+    $("moisture-mode").value = moisture.mode || "surface";
+    $("phi-room").value = moisture.room ?? 50;
+    $("phi-outside").value = moisture.outside ?? 85;
     renderTags();
     $("edge-info").textContent = "Грань не выбрана";
     const regionChoice = $("region-choice").value;
@@ -215,6 +244,7 @@
       );
     syncRegion();
     catalogNote();
+    renderTransient();
     $("study").textContent = ["steel", "wood"].includes($("example").value)
       ? "Сравнить металл / без · 3 сетки"
       : ["hole", "solid"].includes($("example").value)
@@ -225,11 +255,11 @@
       "Пользовательская модель: проверьте единицы, материалы и граничные условия.";
     $("model-json").value = JSON.stringify(model, null, 2);
     $("model-controls").innerHTML =
-      "<h3>λ и локальный размер h</h3><table><tr><th>Область</th><th>λ</th><th>h, мм</th></tr>" +
+      "<h3>λ, μ и локальный размер h</h3><p class=\"note\">μ — сопротивление паропроницанию (из декларации). Для плёнок можно вместо μ задать sd, м: тогда μ = sd / толщина контура. ρ, кг/м³ и c, Дж/(кг·К) нужны для расчёта во времени (у грунтов по ISO 13370 задано сразу ρc).</p><table><tr><th>Область</th><th>λ</th><th>μ</th><th>sd, м</th><th>ρ</th><th>c</th><th>ρc, Дж/(м³·К)</th><th>h, мм</th></tr>" +
       model.regions
         .map(
           (r, i) =>
-            `<tr><td>${esc(r.name || i)}<small>${esc(r.materialName || (r.materialPending ? "Материал не назначен" : "Задано в модели"))}</small></td><td><input data-region="${i}" data-prop="lambda" type="number" min=".000001" step=".01" value="${r.lambda}"></td><td><input data-region="${i}" data-prop="h" type="number" min=".001" step=".1" value="${r.h ?? ""}" placeholder="Авто"></td></tr>`,
+            `<tr><td>${esc(r.name || i)}<small>${esc(r.materialName || (r.materialPending ? "Материал не назначен" : "Задано в модели"))}</small></td><td><input data-region="${i}" data-prop="lambda" type="number" min=".000001" step=".01" value="${r.lambda}"></td><td><input data-region="${i}" data-prop="mu" type="number" min=".000001" step="any" value="${r.mu ?? ""}" placeholder="—"></td><td><input data-region="${i}" data-prop="sd" type="number" min=".000001" step="any" value="${r.sd ?? ""}" placeholder="—"></td><td><input data-region="${i}" data-prop="density" type="number" min=".000001" step="any" value="${r.density ?? ""}" placeholder="${r.rhoC ? "ρc" : "—"}"></td><td><input data-region="${i}" data-prop="heatCapacity" type="number" min=".000001" step="any" value="${r.heatCapacity ?? ""}" placeholder="${r.rhoC ? `${r.rhoC / 1e6} МДж/м³К` : "—"}"></td><td><input data-region="${i}" data-prop="rhoC" type="number" min=".000001" step="any" value="${r.rhoC ?? ""}" placeholder="ρ × c"></td><td><input data-region="${i}" data-prop="h" type="number" min=".001" step=".1" value="${r.h ?? ""}" placeholder="Авто"></td></tr>`,
         )
         .join("") +
       "</table>";
@@ -252,7 +282,7 @@
             invalidate();
             $("status").textContent =
               "Примените параметры материалов и границ перед расчётом.";
-            $("run").disabled = $("study").disabled = true;
+            $("run").disabled = $("study").disabled = $("run-transient").disabled = true;
           }),
       );
   }
@@ -265,9 +295,23 @@
       model = FEMExamples.holeNode($("example").value === "hole");
       $("base").value = 8;
       $("minimum").value = 1;
+    } else if (["ground-psi", "ground-temperature"].includes($("example").value)) {
+      if(!Number.isFinite(+$("ground-width").value) || +$("ground-width").value<=0) throw Error("Укажите ширину здания для профиля грунта.");
+      model = FEMExamples.groundISO(
+        prepare(structuredClone(model)),
+        $("example").value === "ground-temperature",
+        +$("ground-width").value*1000,
+      );
+      $("base").value = 1000;
+      $("minimum").value = 2;
+    } else if ($("example").value === "vapour-wall") {
+      model = FEMExamples.vapourWall();
+      $("base").value = 20;
+      $("minimum").value = 2;
     } else if ($("example").value === "wall") model = FEMExamples.wall(true);
     else if ($("example").value !== "custom")
       model = FEMExamples.windowNode($("example").value === "steel");
+    model=prepare(model);
     controls();
     zoom = 1;
     pan = { x: 0, y: 0 };
@@ -295,13 +339,48 @@
       $("status").textContent = e.message;
     }
   }
+  // Field shown on the drawing: temperature, or relative humidity / vapour
+  // pressure when the result has a vapour solution.
+  let fieldCache = null;
+  function field() {
+    const kind = $("field").value,
+      v = result?.vapour;
+    if (kind !== "temperature" && v?.values) {
+      if (fieldCache?.v !== v || fieldCache.kind !== kind)
+        fieldCache = {
+          v,
+          kind,
+          values:
+            kind === "rh"
+              ? v.values.map((p, i) => (100 * p) / v.saturation[i])
+              : v.values,
+        };
+      return kind === "rh"
+        ? { kind, values: fieldCache.values, title: "Относительная влажность, %", unit: "%" }
+        : { kind, values: fieldCache.values, title: "Давление пара, Па", unit: "Па" };
+    }
+    return {
+      kind: "temperature",
+      values: anim ? animValues : result?.values || [],
+      title: "Температура, °C",
+      unit: "°C",
+    };
+  }
   function range() {
     let min = +$("scale-min").value,
       max = +$("scale-max").value;
-    if ($("auto").checked && result) {
+    const f = field();
+    if (f.kind === "rh" && !$("auto").checked) {
+      min = 0;
+      max = 100;
+    } else if (anim && f.kind === "temperature" && $("auto").checked) {
+      // One scale for the whole animation, so colours do not jump between frames.
+      min = anim.min;
+      max = anim.max;
+    } else if (($("auto").checked || f.kind === "vapour") && result) {
       min = Infinity;
       max = -Infinity;
-      for (const t of result.values) {
+      for (const t of f.values) {
         min = Math.min(min, t);
         max = Math.max(max, t);
       }
@@ -334,7 +413,9 @@
       w = canvas.width,
       h = canvas.height,
       v = view(w, exporting ? h - 200 : h),
-      { min, max } = range();
+      { min, max } = range(),
+      shown = field(),
+      fv = shown.values;
 
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "white";
@@ -348,7 +429,7 @@
       );
       for (const t of result.triangles) {
         const p = t.v.map((i) => screen(result.nodes[i], v)),
-          values = t.v.map((i) => result.values[i]);
+          values = t.v.map((i) => fv[i]);
         const det =
           (p[1].y - p[2].y) * (p[0].x - p[2].x) +
           (p[2].x - p[1].x) * (p[0].y - p[2].y);
@@ -463,8 +544,8 @@
         for (let k = 0; k < 3; k++) {
           const a = t.v[k],
             b = t.v[(k + 1) % 3],
-            ta = result.values[a],
-            tb = result.values[b];
+            ta = fv[a],
+            tb = fv[b];
           if (ta < iso === tb < iso || Math.abs(tb - ta) < 1e-12) continue;
           const f = (iso - ta) / (tb - ta),
             pa = result.nodes[a],
@@ -496,12 +577,12 @@
         ctx.font = `bold ${13 * (canvas.clientWidth ? w / canvas.clientWidth : w / 1000)}px system-ui`;
         ctx.lineWidth = 3;
         ctx.strokeStyle = "white";
-        ctx.strokeText(`${iso} °C`, label[0].x + 4, label[0].y - 5);
+        ctx.strokeText(`${iso} ${shown.unit}`, label[0].x + 4, label[0].y - 5);
         ctx.fillStyle = "#de2028";
-        ctx.fillText(`${iso} °C`, label[0].x + 4, label[0].y - 5);
+        ctx.fillText(`${iso} ${shown.unit}`, label[0].x + 4, label[0].y - 5);
       }
     }
-    if (result && thermal && $("flux").checked) {
+    if (result && thermal && $("flux").checked && !anim) {
       const occupied = new Set();
       ctx.strokeStyle = "#12292c";
       ctx.lineWidth = 1;
@@ -567,8 +648,26 @@
       ctx.strokeStyle = "#a000cc";
       ctx.stroke();
     }
-    if (result?.heat.minSurfacePoint && thermal) {
-      const p = screen(result.heat.minSurfacePoint, v);
+    if (result?.vapour && thermal) {
+      ctx.fillStyle = "#1f5fd6";
+      ctx.strokeStyle = "white";
+      ctx.lineWidth = 1;
+      for (const c of result.vapour.condensing.slice(0, 5000)) {
+        const p = screen(c, v);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    const minNode = anim?.minNode[Math.round(animPos)],
+      minPoint = anim
+        ? minNode >= 0
+          ? result?.nodes[minNode]
+          : null
+        : result?.heat.minSurfacePoint;
+    if (minPoint && thermal) {
+      const p = screen(minPoint, v);
       ctx.beginPath();
       ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
       ctx.strokeStyle = "white";
@@ -584,6 +683,8 @@
     const { min, max } = range();
     $("ramp").style.background = ThermoPalette.css;
     $("ticks").replaceChildren();
+    const shown = field(),
+      step = shown.kind === "vapour" ? 100 : shown.kind === "rh" ? 10 : 5;
     const ticks =
       max === min
         ? [min]
@@ -591,9 +692,9 @@
             min,
             ...Array.from(
               {
-                length: Math.min(100, Math.max(0, Math.ceil((max - min) / 5))),
+                length: Math.min(100, Math.max(0, Math.ceil((max - min) / step))),
               },
-              (_, i) => (Math.floor(min / 5) + 1 + i) * 5,
+              (_, i) => (Math.floor(min / step) + 1 + i) * step,
             ).filter((t) => t > min && t < max && max - t > (max - min) * 0.04),
             max,
           ];
@@ -603,15 +704,17 @@
       e.style.left = `${max > min ? ((t - min) / (max - min)) * 100 : 50}%`;
       $("ticks").append(e);
     });
+    $("scale-title").textContent = shown.title;
+    $("iso-unit").textContent = shown.unit;
     let outside = 0;
     if (result)
-      outside = result.values.filter(
+      outside = shown.values.filter(
         (t) => t < min - 1e-6 || t > max + 1e-6,
       ).length;
     $("scale-note").textContent =
       max < min
         ? "Ошибка: максимум шкалы меньше минимума."
-        : `${$("auto").checked ? "Автоматический" : "Фиксированный общий"} диапазон ${fmt(min)}…${fmt(max)} °C${outside ? ` · Вне шкалы: ${outside} узлов (цвет ограничен)` : ""}`;
+        : `${$("auto").checked || shown.kind === "vapour" ? "Автоматический" : "Фиксированный общий"} диапазон ${fmt(min)}…${fmt(max)} ${shown.unit}${outside ? ` · Вне шкалы: ${outside} узлов (цвет ограничен)` : ""}`;
     canvases.forEach((canvas, i) => {
       const rect = canvas.getBoundingClientRect(),
         dpr = window.devicePixelRatio || 1;
@@ -630,8 +733,13 @@
   }
   function show(r) {
     result = r;
-    model = structuredClone(r.model);
-    $("base").value=r.options.base; $("minimum").value=r.options.minimum; $("unlimited-mesh").checked=!!r.options.unlimited;
+    for(const option of $("field").options) if(option.value!=="temperature") option.disabled=!r.vapour?.values;
+    if(!r.vapour?.values) $("field").value="temperature";
+    // Study variants run on scaled copies; the editor keeps the user's model and mesh.
+    const source = sourceOf.get(r);
+    model = structuredClone(source?.model ?? r.model);
+    const o = source?.options ?? r.options;
+    $("base").value=o.base; $("minimum").value=o.minimum; $("unlimited-mesh").checked=!!r.options.unlimited;
     $("example").value = model.userEdited
       ? "custom"
       : model.name === FEMExamples.windowNode(true).name
@@ -644,7 +752,13 @@
               ? "solid"
               : model.name === FEMExamples.wall().name
                 ? "wall"
-                : "custom";
+                : model.name === FEMExamples.groundNames.psi
+                  ? "ground-psi"
+                  : model.name === FEMExamples.groundNames.temperature
+                    ? "ground-temperature"
+                    : model.name === FEMExamples.vapourWall().name
+                      ? "vapour-wall"
+                      : "custom";
     $("description").textContent = model.description || model.name;
     const s = r.stats,
       h = r.heat;
@@ -652,7 +766,7 @@
     for(const row of h.rows) {
       if(row.length==null)continue;
       const bc=r.model.boundaries[row.boundaryIndex];
-      const role=bc?.role || (bc?.interior ? "room" : /^Улица · /.test(row.name) ? "outside" : row.name === "Грунт на глубине 1,5 м от наружной поверхности" ? "ground" : "other");
+      const role=bc?.role || "other";
       grouped[role in grouped ? role : "other"] += row.outward;
     }
     const floorFlow=h.rows.filter(row=>row.name==="Комната · поверхность пола").reduce((sum,row)=>sum+row.outward,0);
@@ -695,9 +809,76 @@
       "beforeend",
       `<p>Индикатор скачка нормального потока: ${fmt((r.estimator?.relativeIndicator || 0) * 100, 2)} %. Он указывает места локального сгущения; это не гарантированная ошибка Q′ или Tsi.</p>`,
     );
+    if (r.temperatureJumps?.length)
+      $("heat-report").insertAdjacentHTML(
+        "beforeend",
+        `<p class="fail">Скачок заданной температуры поверхности в ${r.temperatureJumps.length} вершинах (${r.temperatureJumps
+          .slice(0, 4)
+          .map((p) => `x=${fmt(p.x, 2)}, y=${fmt(p.y, 2)} мм: ${fmt(p.low)}…${fmt(p.high)} °C`)
+          .join("; ")}${r.temperatureJumps.length > 4 ? "; …" : ""}). В вершине принято среднее. Температуры вдали от вершины сходятся при сгущении, но поток между этими гранями в точке скачка теоретически бесконечен: Q′ таких граней растёт при сгущении и не является результатом.</p>`,
+      );
+    moistureReport(r);
     $("adapt").disabled = !!worker || !r.estimator?.hotspots.length;
     $("export-image").disabled = $("export-result").disabled = false;
     draw();
+  }
+  function moistureReport(r) {
+    const v = r.vapour,
+      box = $("moisture-report");
+    if (!v) {
+      box.replaceChildren();
+      return;
+    }
+    const c = v.climate,
+      perDay = (rate) => fmt(rate * 86400 * 1000, 3),
+      at = (p) => `x=${fmt(p.x, 1)}, y=${fmt(p.y, 1)} мм`,
+      verdict = (ok, text) =>
+        `<strong class="${ok ? "pass" : "fail"}">${text}</strong>`,
+      temps = (list) => list.map((t) => fmt(t, 1)).join(" / ") || "—";
+    let html =
+      `<h2>Влажность и конденсат</h2><p>Комната: ${temps(c.roomTemperatures)} °C, φ ${fmt(c.room, 1)} %` +
+      (c.roomPressure
+        ? `, p = ${fmt(c.roomPressure, 0)} Па, точка росы ${fmt(c.dewPoint, 2)} °C, порог плесени (φ 80 % у поверхности) ${fmt(c.mouldTemperature, 2)} °C`
+        : "") +
+      `. Улица: ${temps(c.outsideTemperatures)} °C, φ ${fmt(c.outside, 1)} %. Грунт: 100 %.</p><h3>Внутренняя поверхность · заданное состояние</h3>`;
+    const s = v.surface;
+    html += s
+      ? `<p>Наибольшая влажность у поверхности ${fmt(s.rh * 100, 1)} % при T = ${fmt(s.t, 2)} °C (${at(s)}). ${
+          s.rh > 1
+            ? verdict(false, "Конденсат на поверхности.")
+            : s.rh > 0.8
+              ? verdict(false, "Риск плесени: φ у поверхности выше 80 %.")
+              : verdict(true, "Порог влажности для заданного состояния не превышен.")
+        }</p>`
+      : "<p>Внутренняя поверхность не отмечена — проверка поверхности не выполнена.</p>";
+    if (v.factor)
+      html += `<p>fRsi = ${fmt(v.factor.fRsi, 3)}; для отсутствия плесени нужно не менее fRsi,min = ${fmt(v.factor.fRsiMin, 3)}. ${verdict(
+        v.factor.fRsi >= v.factor.fRsiMin,
+        v.factor.fRsi >= v.factor.fRsiMin ? "OK" : "Недостаточно",
+      )}</p>`;
+    const strong = (r.model.boundaries || []).filter(
+      (b) => b.interior && b.type === "film" && b.h > 4.0001,
+    );
+    if (strong.length)
+      html += `<p class="fail">Для оценки плесени непрозрачных поверхностей проверьте отдельную постановку с Rsi = 0,25 м²·К/Вт (h = 4). Сейчас h = ${[
+        ...new Set(strong.map((b) => fmt(b.h, 2))),
+      ].join(", ")}: результат зависит от выбранного поверхностного сопротивления.</p>`;
+    if(v.surfaceOnly) { box.innerHTML=html+"<p>Проверка для заданного климата. Диффузия и межслойная конденсация не рассчитывались; годовой прогноз плесени не выполнялся.</p>"; return; }
+    html += "<h3>Внутри конструкции (метод Глазера)</h3>";
+    html += v.condensing.length
+      ? `<p>${verdict(false, "Конденсация внутри конструкции:")} ${perDay(v.total)} г/сут на 1 м длины узла; ${v.condensing.length} узлов сетки (синие точки на рисунке).</p><table><tr><th>Материал</th><th>г/сут на 1 м</th></tr>${v.byRegion
+          .slice()
+          .sort((a, b) => b.rate - a.rate)
+          .map((x) => `<tr><td>${esc(x.name)}</td><td>${perDay(x.rate)}</td></tr>`)
+          .join("")}</table><p class="note">Узел сетки на границе двух материалов делится между ними поровну. Это стационарная оценка для заданного состояния; накопление за зиму и высыхание летом (помесячный расчёт ISO 13788) — следующий шаг.</p>`
+      : `<p>${verdict(true, "Конденсации внутри нет.")} Наибольшая влажность внутри конструкции ${fmt(v.inside.rh * 100, 1)} %${v.inside.x === null ? "" : ` (${at(v.inside)})`}.</p>`;
+    if (!v.stable)
+      html += `<p class="fail">Итерации Глазера не стабилизировались за ${v.iterations}; результат приблизительный.</p>`;
+    else if (!v.converged)
+      html += '<p class="fail">Решение для давления пара не достигло заданной невязки; результат приблизительный. Проверьте очень большие μ (паронепроницаемые слои) и сетку.</p>';
+    html +=
+      '<p class="note">Метод Глазера ISO 13788, расширенный на 2D (инженерное расширение, не нормированный 2D-метод). Только диффузия пара: без капиллярного переноса, накопления влаги, дождя и утечек влажного воздуха через щели. δ0 = 2·10⁻¹⁰ кг/(м·с·Па). μ материалов проверьте по декларациям.</p>';
+    box.innerHTML = html;
   }
   function studyTable() {
     if (results.length < 2) return;
@@ -724,10 +905,28 @@
               prev.heat.minSurface !== null
                 ? Math.abs(r.heat.minSurface - prev.heat.minSurface)
                 : null;
-          return `<tr><td>${esc(r.model.name)}</td><td>${r.options.minimum}</td><td>${r.stats.elements}</td><td>${fmt(r.heat.outgoing, 5)}</td><td>${fmt(r.heat.minSurface, 4)}</td><td class="${dq !== null && dt !== null && dq < qTol && dt < tTol ? "pass" : "fail"}">${dq === null ? "—" : `${fmt(dq, 4)} % / ${fmt(dt, 4)} °C`}</td></tr>`;
+          // Without an interior surface there is no Tsi; judge by Q′ only.
+          const state =
+            dq === null
+              ? ""
+              : dq < qTol && (dt === null || dt < tTol)
+                ? "pass"
+                : "fail";
+          return `<tr><td>${esc(r.model.name)}</td><td>${r.options.minimum}</td><td>${r.stats.elements}</td><td>${fmt(r.heat.outgoing, 5)}</td><td>${fmt(r.heat.minSurface, 4)}</td><td class="${state}">${dq === null ? "—" : `${fmt(dq, 4)} % / ${dt === null ? "Tsi не задана" : `${fmt(dt, 4)} °C`}`}</td></tr>`;
         })
         .join("") +
       "</table>";
+  }
+  // Worker code is the source of the scripts already loaded on this page, so
+  // file:// works without a server and there is no packed copy to rebuild.
+  function makeWorker() {
+    const source = [ThermoFEM.factory, FEMExamples.factory, ThermoWorkerMain]
+        .map((f) => `(${f})(self);`)
+        .join("\n"),
+      url = URL.createObjectURL(new Blob([source], { type: "text/javascript" })),
+      w = new Worker(url);
+    URL.revokeObjectURL(url);
+    return w;
   }
   function run(study = false, adaptive = false) {
     $("example").value = model.userEdited ? "custom" : loadedExample;
@@ -738,6 +937,7 @@
     }
     const previous = result;
     stop();
+    clearAnimation();
     results = adaptive && previous ? [previous] : [];
     result = null;
     $("adapt").disabled = true;
@@ -747,10 +947,11 @@
       $("status").textContent = "Нужны 0 < минимальный размер ≤ базовый.";
       return;
     }
-    $("run").disabled = $("study").disabled = true;
+    $("run").disabled = $("study").disabled = $("run-transient").disabled = true;
     $("cancel").disabled = false;
     $("export-image").disabled = $("export-result").disabled = true;
     $("metrics").replaceChildren();
+    $("moisture-report").replaceChildren();
     $("convergence").replaceChildren();
     $("heat-report").replaceChildren();
     $("result-choice").hidden = true;
@@ -785,6 +986,10 @@
                   : holeMode
                     ? FEMExamples.holeNode(metal)
                     : FEMExamples.windowNode(metal);
+              const source = {
+                model: structuredClone(m),
+                options: { base, minimum },
+              };
               if (metal === null)
                 m.regions.forEach((r) => {
                   if (r.h) r.h *= f;
@@ -793,6 +998,7 @@
               return {
                 model: m,
                 options: { base: base * f, minimum: minimum * f },
+                source,
               };
             }),
           )
@@ -800,8 +1006,9 @@
     if (!study && !adaptive && ["steel", "wood"].includes($("example").value))
       jobs[0].model.regions[6].h = minimum;
     const id = revision;
-    worker = new Worker("fem-worker.js?v=20261029-2");
+    worker = makeWorker();
     $("status").textContent = "Строю сетку…";
+    let received = 0;
     worker.onmessage = ({ data }) => {
       if (data.id !== revision) return;
       if (data.message) $("status").textContent = data.message;
@@ -811,6 +1018,8 @@
         return;
       }
       if (data.partial) {
+        const source = jobs[received++]?.source;
+        if (source) sourceOf.set(data.partial, source);
         results.push(data.partial);
         show(data.partial);
         studyTable();
@@ -838,10 +1047,365 @@
       stop();
       $("status").textContent = "Ошибка Worker: " + e.message;
     };
+    const moisture = model.moisture?.enabled
+      ? { room: +model.moisture.room, outside: +model.moisture.outside, mode:model.moisture.mode || "surface" }
+      : null;
     jobs.forEach((job) => {
       job.options.unlimited = $("unlimited-mesh").checked;
+      if (moisture) job.vapour = moisture;
     });
-    worker.postMessage({ id, jobs });
+    worker.postMessage({ id, jobs: jobs.map(({ source, ...job }) => job) });
+  }
+  // ---- Animation: scenario of key frames, transient run, player, chart, video.
+  const frameKeys = ["t", "room", "outside", "ground"];
+  function transientSettings() {
+    if (!model.transient) {
+      const air = (role, fallback) =>
+        (model.boundaries || []).find((b) => b.role === role)?.temperature ?? fallback;
+      const room = air("room", 20),
+        outside = air("outside", -10);
+      // Default: a cold snap, outside air falls by 10 K over a day.
+      model.transient = {
+        duration: 24,
+        unit: "h",
+        steps: 200,
+        outputs: 100,
+        frames: [
+          { t: 0, room, outside },
+          { t: 24, room, outside: outside - 10 },
+        ],
+      };
+    }
+    return model.transient;
+  }
+  function renderTransient() {
+    const s = transientSettings();
+    $("tr-duration").value = s.duration;
+    $("tr-unit").value = s.unit;
+    $("tr-steps").value = s.steps;
+    $("tr-outputs").value = s.outputs;
+    $("tr-frames").innerHTML =
+      `<table><tr><th>Время</th><th>Комната, °C</th><th>Улица, °C</th><th>Грунт, °C</th></tr>${s.frames
+        .map(
+          (f, i) =>
+            `<tr>${frameKeys
+              .map(
+                (k) =>
+                  `<td><input data-frame="${i}" data-key="${k}" type="number" step="any" value="${f[k] ?? ""}" aria-label="${k} кадра ${i + 1}"></td>`,
+              )
+              .join("")}</tr>`,
+        )
+        .join("")}</table>`;
+    document
+      .querySelectorAll("#tr-frames input")
+      .forEach((e) => (e.oninput = readTransient));
+  }
+  function readTransient() {
+    const frames = [];
+    for (const e of document.querySelectorAll("#tr-frames input")) {
+      const f = (frames[+e.dataset.frame] ||= {});
+      if (e.value !== "" && Number.isFinite(+e.value)) f[e.dataset.key] = +e.value;
+    }
+    model.transient = {
+      duration: +$("tr-duration").value,
+      unit: $("tr-unit").value,
+      steps: Math.round(+$("tr-steps").value),
+      outputs: Math.round(+$("tr-outputs").value),
+      frames: frames.filter((f) => Number.isFinite(f.t)),
+    };
+    if (activeSavedIndex !== null) autoSave();
+    return model.transient;
+  }
+  const unitSeconds = (unit) => (unit === "d" ? 86400 : 3600),
+    timeText = (t) =>
+      `${fmt(t / unitSeconds(anim?.unit), 2)} ${anim?.unit === "d" ? "сут" : "ч"}`;
+  function clearAnimation() {
+    anim = null;
+    animValues = null;
+    playing = false;
+    $("play").textContent = "▶ Воспроизвести";
+    $("player").hidden = true;
+  }
+  function runTransient() {
+    if (model.regions.some((r) => r.materialPending)) {
+      $("status").textContent = "Назначьте материалы всем импортированным областям.";
+      return;
+    }
+    const s = readTransient(),
+      k = unitSeconds(s.unit),
+      base = +$("base").value,
+      minimum = +$("minimum").value;
+    if (!(base >= minimum && minimum > 0)) {
+      $("status").textContent = "Нужны 0 < минимальный размер ≤ базовый.";
+      return;
+    }
+    if (s.frames.some((f) => f.t > s.duration))
+      $("status").textContent = "Внимание: есть кадры позже конца процесса — они не войдут в анимацию.";
+    stop();
+    clearAnimation();
+    results = [];
+    result = null;
+    $("metrics").replaceChildren();
+    $("moisture-report").replaceChildren();
+    $("convergence").replaceChildren();
+    $("heat-report").replaceChildren();
+    $("result-choice").hidden = true;
+    $("run").disabled = $("study").disabled = $("run-transient").disabled = true;
+    $("cancel").disabled = false;
+    draw();
+    const source = { model: structuredClone(model), options: { base, minimum } },
+      id = revision;
+    worker = makeWorker();
+    $("status").textContent = "Расчёт во времени: начальное состояние…";
+    worker.onmessage = ({ data }) => {
+      if (data.id !== revision) return;
+      if (data.message) $("status").textContent = data.message;
+      if (data.error) {
+        stop();
+        $("status").textContent = "Расчёт не принят: " + data.error;
+        return;
+      }
+      if (data.transient) {
+        stop();
+        const out = data.transient;
+        sourceOf.set(out.start, source);
+        results = [out.start];
+        show(out.start);
+        controls();
+        startAnimation(out, s.unit);
+        $("status").textContent = `Готово: ${out.steps} шагов по времени, ${out.frames.length} кадров. Показатели ниже — начальное состояние; потоки и баланс текущего шага — в проигрывателе.`;
+      }
+    };
+    worker.onerror = (e) => {
+      stop();
+      $("status").textContent = "Ошибка Worker: " + e.message;
+    };
+    worker.postMessage({
+      id,
+      transient: {
+        model: structuredClone(model),
+        options: { base, minimum, unlimited: $("unlimited-mesh").checked },
+        scenario: {
+          duration: s.duration * k,
+          steps: s.steps,
+          outputs: s.outputs,
+          frames: s.frames.map((f) => ({ ...f, t: f.t * k })),
+        },
+      },
+    });
+  }
+  function startAnimation(out, unit) {
+    let low = Infinity,
+      high = -Infinity;
+    for (const f of out.frames)
+      for (const v of f) {
+        if (v < low) low = v;
+        if (v > high) high = v;
+      }
+    anim = { ...out, unit, min: low, max: high };
+    animValues = new Float32Array(out.frames[0].length);
+    $("player").hidden = false;
+    $("frame").max = out.frames.length - 1;
+    $("player-note").textContent = `Нестационарный расчёт, неявная схема Эйлера: шаг ${timeText(out.dt)}, ${out.steps} шагов, ${out.frames.length} кадров. Начало — стационарное состояние первого кадра. Цветовая шкала при «Автошкале» общая для всей анимации. Потоки q и показатели ниже относятся к начальному состоянию.`;
+    setAnimPosition(0);
+  }
+  function setAnimPosition(pos) {
+    if (!anim) return;
+    const last = anim.frames.length - 1;
+    animPos = Math.max(0, Math.min(last, pos));
+    const k = Math.min(Math.floor(animPos), last),
+      s = animPos - k,
+      a = anim.frames[k],
+      b = anim.frames[Math.min(k + 1, last)];
+    for (let i = 0; i < a.length; i++) animValues[i] = a[i] + s * (b[i] - a[i]);
+    const t = anim.times[k] + s * ((anim.times[Math.min(k + 1, last)] ?? anim.times[k]) - anim.times[k]),
+      j = Math.max(0, Math.min(anim.series.t.length - 1, Math.round(t / anim.dt))),
+      tsi = anim.series.tsiMin[j];
+    $("frame").value = animPos;
+    $("frame-label").textContent = `t = ${timeText(t)}${tsi === null ? "" : ` · Tsi,min ${fmt(tsi, 2)} °C`} · из комнаты ${fmt(anim.series.roomFlow[j], 2)} Вт/м · на улицу ${fmt(anim.series.outsideFlow[j], 2)} Вт/м · накопление ${fmt(anim.series.storageRate[j], 2)} Вт/м · невязка ${fmt(anim.series.energyResidual[j], 8)} Вт/м`;
+    drawChart(t);
+    schedule();
+  }
+  function drawChart(now) {
+    const canvas = $("series-chart"),
+      box = canvas.getBoundingClientRect(),
+      dpr = window.devicePixelRatio || 1;
+    if (!anim || !box.width) return;
+    canvas.width = Math.round(box.width * dpr);
+    canvas.height = Math.round(box.height * dpr);
+    const ctx = canvas.getContext("2d"),
+      w = canvas.width,
+      h = canvas.height,
+      pad = { l: 46 * dpr, r: 10 * dpr, t: 22 * dpr, b: 22 * dpr },
+      { t } = anim.series,
+      air = (role) =>
+        t.map((x) => ThermoFEM.scenarioAt(anim.scenario.frames, x)[role] ?? null),
+      lines = [
+        { name: "Комната, воздух", color: "#de2028", data: air("room") },
+        { name: "Улица, воздух", color: "#1f5fd6", data: air("outside") },
+        { name: "Tsi,min", color: "#087c78", data: anim.series.tsiMin },
+      ].filter((l) => l.data.some((v) => v !== null));
+    const all = lines.flatMap((l) => l.data.filter((v) => v !== null)),
+      low = Math.min(...all),
+      high = Math.max(...all) > low ? Math.max(...all) : low + 1,
+      end = t.at(-1) || 1,
+      X = (x) => pad.l + ((w - pad.l - pad.r) * x) / end,
+      Y = (y) => h - pad.b - ((h - pad.t - pad.b) * (y - low)) / (high - low);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "#c9d4d6";
+    ctx.lineWidth = dpr;
+    ctx.strokeRect(pad.l, pad.t, w - pad.l - pad.r, h - pad.t - pad.b);
+    ctx.fillStyle = "#18383d";
+    ctx.font = `${11 * dpr}px system-ui`;
+    ctx.textAlign = "right";
+    ctx.fillText(`${fmt(high, 1)} °C`, pad.l - 4 * dpr, pad.t + 8 * dpr);
+    ctx.fillText(`${fmt(low, 1)} °C`, pad.l - 4 * dpr, h - pad.b);
+    ctx.textAlign = "left";
+    ctx.fillText("0", pad.l, h - 6 * dpr);
+    ctx.textAlign = "right";
+    ctx.fillText(timeText(end), w - pad.r, h - 6 * dpr);
+    ctx.textAlign = "left";
+    let lx = pad.l;
+    for (const l of lines) {
+      ctx.strokeStyle = l.color;
+      ctx.lineWidth = 2 * dpr;
+      ctx.beginPath();
+      let started = false;
+      l.data.forEach((v, i) => {
+        if (v === null) return;
+        started ? ctx.lineTo(X(t[i]), Y(v)) : ctx.moveTo(X(t[i]), Y(v));
+        started = true;
+      });
+      ctx.stroke();
+      ctx.fillStyle = l.color;
+      ctx.fillRect(lx, 7 * dpr, 14 * dpr, 3 * dpr);
+      ctx.fillStyle = "#18383d";
+      ctx.fillText(l.name, lx + 18 * dpr, 13 * dpr);
+      lx += ctx.measureText(l.name).width + 34 * dpr;
+    }
+    if (Number.isFinite(now)) {
+      ctx.strokeStyle = "#18383d";
+      ctx.lineWidth = dpr;
+      ctx.beginPath();
+      ctx.moveTo(X(now), pad.t);
+      ctx.lineTo(X(now), h - pad.b);
+      ctx.stroke();
+    }
+  }
+  function play() {
+    if (!anim) return;
+    if (playing) {
+      playing = false;
+      $("play").textContent = "▶ Воспроизвести";
+      return;
+    }
+    if (animPos >= anim.frames.length - 1) setAnimPosition(0);
+    playing = true;
+    $("play").textContent = "❚❚ Пауза";
+    let last = performance.now();
+    const tick = (now) => {
+      if (!playing || !anim) return;
+      const rate = (anim.frames.length - 1) / Math.max(1, +$("playback").value || 10);
+      setAnimPosition(animPos + (rate * (now - last)) / 1000);
+      last = now;
+      if (animPos >= anim.frames.length - 1) {
+        playing = false;
+        $("play").textContent = "▶ Воспроизвести";
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+  // Video is recorded in the browser (MediaRecorder) and saved as a local file;
+  // nothing is uploaded. Frames are drawn in real time, so a slow computer makes
+  // the clip longer than the chosen playback time.
+  async function exportVideo() {
+    if (!anim) return;
+    const type = window.MediaRecorder
+      ? ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find((t) =>
+          MediaRecorder.isTypeSupported(t),
+        )
+      : null;
+    if (!type || !HTMLCanvasElement.prototype.captureStream) {
+      $("status").textContent = "Этот браузер не умеет записывать видео. Используйте Edge или Chrome.";
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 1080;
+    const fps = 25,
+      seconds = Math.max(1, +$("playback").value || 10),
+      total = Math.round(fps * seconds),
+      stream = canvas.captureStream(fps),
+      recording = anim,
+      recorder = new MediaRecorder(stream, {
+        mimeType: type,
+        videoBitsPerSecond: 8e6,
+      }),
+      chunks = [],
+      stopped = new Promise((resolve) => (recorder.onstop = resolve)),
+      keep = animPos;
+    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    playing = false;
+    $("play").textContent = "▶ Воспроизвести";
+    $("export-video").disabled = $("play").disabled = true;
+    videoFrame(canvas, 0);
+    recorder.start();
+    try {
+      for (let f = 0; f <= total; f++) {
+        if(anim!==recording) throw Error("Модель изменена; запись видео остановлена.");
+        const begin = performance.now();
+        setAnimPosition((f / total) * (anim.frames.length - 1));
+        videoFrame(canvas);
+        $("status").textContent = `Запись видео · кадр ${f}/${total}`;
+        await new Promise((r) => setTimeout(r, Math.max(0, 1000 / fps - (performance.now() - begin))));
+      }
+    } catch(e) {
+      $("status").textContent=e.message;
+      return;
+    } finally {
+      recorder.stop();
+      await stopped;
+      stream.getTracks().forEach(track=>track.stop());
+      $("export-video").disabled = $("play").disabled = false;
+    }
+    download("Thermo2D-animation.webm", new Blob(chunks, { type: "video/webm" }));
+    $("status").textContent = "Видео сохранено: Thermo2D-animation.webm";
+    setAnimPosition(keep);
+  }
+  function videoFrame(canvas) {
+    paint(canvas, true, true);
+    const ctx = canvas.getContext("2d"),
+      w = canvas.width,
+      h = canvas.height,
+      { min, max } = range();
+    ctx.fillStyle = "rgba(255,255,255,.96)";
+    ctx.fillRect(0, h - 200, w, 200);
+    ctx.fillStyle = "#18383d";
+    ctx.font = "24px system-ui";
+    ctx.textAlign = "left";
+    ctx.fillText(`${model.name} · ${$("frame-label").textContent}`, 30, h - 160, w - 60);
+    for (let x = 0; x < w - 60; x++) {
+      ctx.fillStyle = `rgb(${ThermoPalette.color(min + ((max - min) * x) / (w - 61), min, max)})`;
+      ctx.fillRect(30 + x, h - 130, 1, 24);
+    }
+    ctx.fillStyle = "#18383d";
+    ctx.font = "19px system-ui";
+    for (let i = 0; i <= 8; i++) {
+      ctx.textAlign = i === 8 ? "right" : i === 0 ? "left" : "center";
+      ctx.fillText(`${fmt(min + ((max - min) * i) / 8, 1)} ${field().unit}`, 30 + ((w - 60) * i) / 8, h - 80);
+    }
+    ctx.textAlign = "left";
+    ctx.font = "16px system-ui";
+    ctx.fillText(
+      `Нестационарный 2D-расчёт Thermo2D, неявная схема Эйлера, шаг ${timeText(anim.dt)}. Не сертифицированный расчёт.`,
+      30,
+      h - 40,
+      w - 60,
+    );
   }
   function download(name, blob) {
     const url = URL.createObjectURL(blob),
@@ -859,8 +1423,29 @@
   }
   let loadedExample = $("example").value;
   $("example").onchange=()=>{ $("load-example").dataset.choice=$("example").value; };
-  $("load-example").onclick = () => { activeSavedIndex = null; selectedRegions.clear(); selectedEdges.length = 0; select(); loadedExample=$("example").value; autoSave(); };
+  $("load-example").onclick = () => { try { activeSavedIndex = null; selectedRegions.clear(); selectedEdges.length = 0; select(); loadedExample=$("example").value; autoSave(); } catch(e) { $("status").textContent=e.message; } };
   $("run").onclick = () => run();
+  $("run-transient").onclick = runTransient;
+  for (const id of ["tr-duration", "tr-unit", "tr-steps", "tr-outputs"])
+    $(id).oninput = readTransient;
+  $("tr-add").onclick = () => {
+    const s = readTransient(),
+      last = s.frames.at(-1) || { t: 0 };
+    s.frames.push({ ...last, t: Math.min(s.duration, last.t + s.duration / 4) });
+    renderTransient();
+  };
+  $("tr-remove").onclick = () => {
+    const s = readTransient();
+    if (s.frames.length > 1) s.frames.pop();
+    renderTransient();
+  };
+  $("play").onclick = play;
+  $("frame").oninput = () => {
+    playing = false;
+    $("play").textContent = "▶ Воспроизвести";
+    setAnimPosition(+$("frame").value);
+  };
+  $("export-video").onclick = exportVideo;
   $("study").onclick = () => run(true);
   $("cancel").onclick = () => {
     stop();
@@ -875,7 +1460,7 @@
       if (!m.regions?.length) throw Error("Нужен массив regions.");
       ThermoFEM.validate(m);
       m.userEdited = true;
-      model = m;
+      model = prepare(m);
       overlay = null;
       $("overlay-file").value = "";
       selectedRegion = null;
@@ -894,6 +1479,10 @@
   function autoSave() {
     try {
       const saved = savedModels();
+      for(const storageKey of ["thermo2d.fem-nodes.v1","thermo2d.material-library.v1","thermo2d.temperature-library.v1"]) {
+        const backup=storageKey+".before-20261101";
+        if(localStorage.getItem(backup)===null) localStorage.setItem(backup,localStorage.getItem(storageKey)||"[]");
+      }
       const key = "thermo2d.fem-nodes.before-autosave.v1";
       if (localStorage.getItem(key) === null)
         localStorage.setItem(key, localStorage.getItem("thermo2d.fem-nodes.v1") || "[]");
@@ -935,6 +1524,7 @@
       saved.push({
         name: `${model.name || "Узел"} · ${new Date().toLocaleString("ru-RU")}`,
         model: structuredClone(model),
+        meshOptions: {base:+$("base").value,minimum:+$("minimum").value,unlimited:$("unlimited-mesh").checked},
       });
       localStorage.setItem("thermo2d.fem-nodes.v1", JSON.stringify(saved));
       savedModelChoices();
@@ -953,11 +1543,11 @@
       ThermoFEM.validate(next);
       activeSavedIndex = +$("saved-model-choice").value;
       selectedRegions.clear(); selectedEdges.length = 0;
-      model = next;
+      model = prepare(next);
       overlay = null;
       $("overlay-file").value = "";
       selectedRegion = null;
-      changed();
+      invalidate(); controls();
       zoom = 1;
       pan = { x: 0, y: 0 };
       draw();
@@ -976,7 +1566,7 @@
         if (!s) return null;
         const v = +s;
         if (!Number.isFinite(v) || v <= 0)
-          throw Error("ρ и c должны быть положительными или пустыми.");
+          throw Error("ρ, c и μ должны быть положительными или пустыми.");
         return v;
       };
       const m = {
@@ -987,6 +1577,8 @@
         lambda,
         density: optional("custom-material-density"),
         heatCapacity: optional("custom-material-capacity"),
+        mu: optional("custom-material-mu") ?? undefined,
+        muSource: $("custom-material-mu").value ? "Задано пользователем (декларация)" : undefined,
         color: "#bddcc2",
         hatch: "solid",
         note: "Задано пользователем",
@@ -1030,7 +1622,13 @@
       heatCapacity: m.heatCapacity,
       materialNote: m.note,
       materialSource: m.source,
+      mu: m.mu,
+      muSource: m.muSource,
+      rhoC: m.rhoC,
     });
+    if (m.mu === undefined) delete r.mu;
+    if (m.rhoC === undefined) delete r.rhoC;
+    delete r.sd;
     delete r.materialPending;
     }
     changed();
@@ -1146,7 +1744,7 @@
         }
       }
       ThermoFEM.validate(next);
-      model=next; model.name=$("node-name").value.trim(); model.userEdited=true;
+      model=prepare(next); model.name=next.name?.trim() || $("node-name").value.trim() || file.name; model.userEdited=true;
       selectedRegions.clear(); selectedEdges.length=0; selectedRegion=null; selectedEdge=null;
       overlay=null; $("overlay-file").value=""; activeSavedIndex=null;
       zoom=1; pan={x:0,y:0}; changed();
@@ -1158,6 +1756,7 @@
   $("export-result").onclick = () =>
     jsonDownload("Thermo2D-FEM-result.json", {
       result,
+      animation: anim ? {times:anim.times, frames:anim.frames.map(f=>Array.from(f)), series:anim.series, dt:anim.dt, steps:anim.steps, scenario:anim.scenario} : undefined,
       convergence: results.map((r) => ({
         name: r.model.name,
         options: r.options,
@@ -1193,7 +1792,9 @@
     ctx.fillStyle = "#18383d";
     ctx.font = "28px system-ui";
     ctx.fillText(
-      `${model.name} · Суммарный отток=${fmt(result.heat.outgoing, 5)} Вт/м · Tsi,min=${fmt(result.heat.minSurface, 3)} °C`,
+      anim
+        ? `${model.name} · ${$("frame-label").textContent}`
+        : `${model.name} · Суммарный отток=${fmt(result.heat.outgoing, 5)} Вт/м · Tsi,min=${fmt(result.heat.minSurface, 3)} °C`,
       40,
       2042,
       2320,
@@ -1209,7 +1810,7 @@
       for (let i = 0; i <= 8; i++) {
         ctx.textAlign = i === 8 ? "right" : i === 0 ? "left" : "center";
         ctx.fillText(
-          `${fmt(min + ((max - min) * i) / 8, 1)} °C`,
+          `${fmt(min + ((max - min) * i) / 8, 1)} ${field().unit}`,
           40 + (2320 * i) / 8,
           2125,
         );
@@ -1217,7 +1818,7 @@
     ctx.textAlign = "left";
     ctx.font = "19px system-ui";
     ctx.fillText(
-      `2D — непрерывное включение; ${result.stats.elements} треугольников; рёбра ${fmt(result.stats.minEdge, 4)}…${fmt(result.stats.maxEdge, 2)} мм; баланс ${fmt(result.heat.balance * 100, 8)} %`,
+      `2D — непрерывное включение; ${result.stats.elements} треугольников; рёбра ${fmt(result.stats.minEdge, 4)}…${fmt(result.stats.maxEdge, 2)} мм; баланс ${anim ? "начального состояния " : ""}${fmt(result.heat.balance * 100, 8)} %`,
       40,
       2163,
     );
@@ -1281,7 +1882,19 @@
     show(results[+$("result-choice").value]);
     controls();
   };
+  for (const id of ["moisture-on", "moisture-mode", "phi-room", "phi-outside"])
+    $(id).oninput = () => {
+      model.moisture = {
+        enabled: $("moisture-on").checked,
+        mode: $("moisture-mode").value,
+        room: +$("phi-room").value,
+        outside: +$("phi-outside").value,
+      };
+      invalidate();
+      if (activeSavedIndex !== null) autoSave();
+    };
   for (const id of [
+    "field",
     "show-result",
     "show-scale",
     "boundary-medium",
@@ -1415,12 +2028,23 @@
           u = ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / det,
           w = ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / det;
         if (u >= -1e-8 && w >= -1e-8 && u + w <= 1 + 1e-8) {
-          const temp =
-            u * result.values[t.v[0]] +
-            w * result.values[t.v[1]] +
-            (1 - u - w) * result.values[t.v[2]];
+          const tv = anim ? animValues : result.values,
+            temp = u * tv[t.v[0]] + w * tv[t.v[1]] + (1 - u - w) * tv[t.v[2]];
+          const gradient = [
+            (tv[t.v[0]]*(b.y-c.y)+tv[t.v[1]]*(c.y-a.y)+tv[t.v[2]]*(a.y-b.y))/det,
+            (tv[t.v[0]]*(c.x-b.x)+tv[t.v[1]]*(a.x-c.x)+tv[t.v[2]]*(b.x-a.x))/det
+          ];
+          const currentQ=anim ? 1000*result.model.regions[t.region].lambda*Math.hypot(...gradient) : Math.hypot(...t.q);
+          const vp = result.vapour?.values,
+            pressure = vp
+              ? u * vp[t.v[0]] + w * vp[t.v[1]] + (1 - u - w) * vp[t.v[2]]
+              : null;
           $("hover").textContent =
-            `x=${fmt(p.x, 2)}, y=${fmt(p.y, 2)} мм · ${model.regions[t.region].name || t.region} · T=${fmt(temp, 3)} °C · |q|=${fmt(Math.hypot(...t.q), 2)} Вт/м²`;
+            `x=${fmt(p.x, 2)}, y=${fmt(p.y, 2)} мм · ${model.regions[t.region].name || t.region} · T=${fmt(temp, 3)} °C · |q|=${fmt(currentQ, 2)} Вт/м²${
+              vp
+                ? ` · p=${fmt(pressure, 0)} Па · φ=${fmt((100 * pressure) / ThermoFEM.psat(temp), 1)} %`
+                : ""
+            }`;
           return;
         }
       }
@@ -1432,7 +2056,7 @@
     try {
       const saved = sessionStorage.getItem("thermo2d.fem-transfer.v1");
       if (saved) {
-        model = JSON.parse(saved);
+        model = prepare(JSON.parse(saved));
         $("example").value = "custom";
       }
     } catch (e) {

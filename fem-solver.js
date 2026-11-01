@@ -3,7 +3,7 @@
  * holes. Every shared vertical trace uses the same nodes. No raster geometry.
  * Sweep refinement is graded but anisotropic; it is not a Delaunay mesher.
  */
-(function (root) {
+(function thermoSolver(root) {
   "use strict";
   const EPS = 1e-7,
     finite = Number.isFinite;
@@ -388,7 +388,9 @@
   function solve(model, options = {}, progress = () => {}) {
     const start = Date.now();
     progress("Построение согласованной сетки");
-    const m = mesh(model, options),
+    // options.mesh reuses an existing mesh (vapour on the thermal mesh); its
+    // triangles must be fresh copies because solve() stores data on them.
+    const m = options.mesh || mesh(model, options),
       { nodes, triangles } = m,
       n = nodes.length;
     const rows = Array.from({ length: n }, () => new Map()),
@@ -419,7 +421,10 @@
         throw Error("Конфликт температур в общей вершине.");
       fixed.set(i, value);
     }
-    const matched = new Set(),
+    // Surface temperatures may jump at a shared vertex (ISO 10211 case 1).
+    // The vertex takes the mean; the error is local and shrinks with the mesh.
+    const surface = new Map(),
+      matched = new Set(),
       covered = (model.boundaries || []).map(() => 0);
     for (const e of m.boundaryEdges) {
       const [i, j] = e.v,
@@ -450,10 +455,9 @@
         add(j, i, (bc.h * L) / 6);
         rhs[i] += (bc.h * L * bc.temperature) / 2;
         rhs[j] += (bc.h * L * bc.temperature) / 2;
-      } else {
-        prescribe(i, bc.temperature);
-        prescribe(j, bc.temperature);
-      }
+      } else
+        for (const k of [i, j])
+          surface.set(k, [...(surface.get(k) || []), bc.temperature]);
       boundary.push({ v: [i, j], index, L, bc });
     }
     if (matched.size !== (model.boundaries || []).length)
@@ -466,10 +470,27 @@
           "Граничное условие покрывает зазор или только часть внешней грани. Разбейте условие по геометрии.",
         );
     });
+    const temperatureJumps = [];
+    for (const [i, values] of surface) {
+      const low = Math.min(...values),
+        high = Math.max(...values);
+      if (high - low > EPS) {
+        if (!options.allowTemperatureJumps) throw Error("Конфликт температур в общей вершине. Разрыв допускается только в явно заданном проверочном расчёте.");
+        temperatureJumps.push({ ...nodes[i], low, high });
+      }
+      prescribe(i, (low + high) / 2);
+    }
     triangles.forEach((t) => {
       const v = model.regions[t.region].temperature;
       if (finite(v)) t.v.forEach((i) => prescribe(i, v));
     });
+    // Extra node values (Glaser clamps); nodes already fixed keep their value.
+    const clamped = [];
+    for (const [i, v] of options.fixedNodes || [])
+      if (!fixed.has(i)) {
+        fixed.set(i, v);
+        clamped.push(i);
+      }
     // A separate connected component needs its own temperature anchor.
     const anchored = new Set([
         ...fixed.keys(),
@@ -716,6 +737,8 @@
         minSurface: finite(minSurface) ? minSurface : null,
         minSurfacePoint,
       },
+      temperatureJumps,
+      clampedReactions: clamped.map((i) => [i, reactions[i]]),
       stats: {
         ...m.stats,
         iterations: iteration,
@@ -725,7 +748,507 @@
       converged,
     };
   }
-  const api = { mesh, solve, validate, distance };
+  // Saturation pressure and its inverse, ISO 13788 (Pa, °C).
+  const psat = (t) =>
+    610.5 *
+    Math.exp(t >= 0 ? (17.269 * t) / (237.3 + t) : (21.875 * t) / (265.5 + t));
+  function dewPoint(p) {
+    const x = Math.log(p / 610.5);
+    return x >= 0 ? (237.3 * x) / (17.269 - x) : (265.5 * x) / (21.875 - x);
+  }
+  const DELTA0 = 2e-10; // kg/(m·s·Pa), vapour permeability of still air, ISO 13788
+  // μ of a region; a thin layer may give sd (m) instead, then μ = sd / thickness,
+  // with thickness 2·area/perimeter (exact for a long thin strip).
+  function regionMu(r) {
+    if (!(r.sd > 0)) return r.mu;
+    const a =
+        area(r.points) - (r.holes || []).reduce((s, p) => s + area(p), 0),
+      perimeter = r.points.reduce(
+        (s, p, i) => s + length(p, r.points[(i + 1) % r.points.length]),
+        0,
+      );
+    return r.sd / ((2 * a) / perimeter / 1000);
+  }
+  /* Steady vapour diffusion on the thermal mesh: Glaser method of ISO 13788,
+   * extended to 2D (engineering extension, not a standardised 2D method).
+   * δ = δ0/μ. Faces with role room / outside get p = φ·psat(θ of their air),
+   * ground faces p = psat (saturated soil); faces without a role are
+   * vapour-tight. Where p would exceed psat(T) the node is clamped to psat and
+   * the excess inflow is the condensation rate; clamps that would dry are
+   * released and the field is solved again until the set is stable.
+   * No capillary transport, sorption, rain or air leakage. */
+  function vapour(model, thermal, climate, progress = () => {}) {
+    const missing = model.regions.filter(
+      (r) => !(r.sd > 0) && !(finite(r.mu) && r.mu > 0),
+    );
+    if (missing.length)
+      throw Error(
+        `Для расчёта влаги задайте μ (или sd): ${missing
+          .slice(0, 5)
+          .map((r) => r.name)
+          .join(", ")}${missing.length > 5 ? " …" : ""}.`,
+      );
+    if (!(climate.room > 0 && climate.room <= 100) || !(climate.outside > 0 && climate.outside <= 100))
+      throw Error("Относительная влажность должна быть от 0 до 100 %.");
+    const phi = { room: climate.room / 100, outside: climate.outside / 100, ground: 1 },
+      faces = (model.boundaries || []).filter((b) => b.role in phi);
+    if (!faces.some((b) => b.role === "room"))
+      throw Error("Для расчёта влаги отметьте грани комнаты: «Куда» = Комната.");
+    if (faces.some(b => b.role !== "ground" && b.type !== "film"))
+      throw Error("Для расчёта влажности задайте температуру воздуха и h у комнаты/улицы; температура поверхности не является температурой воздуха.");
+    const vm = {
+      regions: model.regions.map((r) => ({
+        name: r.name,
+        points: r.points,
+        holes: r.holes,
+        lambda: 1 / regionMu(r),
+      })),
+      boundaries: faces.map((b) => ({
+        name: b.name,
+        a: b.a,
+        b: b.b,
+        type: "temperature",
+        temperature: phi[b.role] * psat(b.temperature),
+      })),
+    };
+    const { nodes, boundaryEdges } = thermal,
+      T = thermal.values,
+      n = nodes.length,
+      sat = Float64Array.from(T, psat),
+      onFace = (bcs, e) =>
+        bcs.some((bc) =>
+          e.v.every((i) => distance(nodes[i], bc.a, bc.b) < EPS),
+        ),
+      faceNodes = new Set(
+        boundaryEdges.filter((e) => onFace(faces, e)).flatMap((e) => e.v),
+      );
+    const run = (fixedNodes) =>
+      solve(
+        vm,
+        {
+          tolerance: 1e-7,
+          fixedNodes,
+          mesh: {
+            nodes,
+            boundaryEdges,
+            stats: thermal.stats,
+            options: thermal.options,
+            triangles: thermal.triangles.map((t) => ({ v: t.v, region: t.region })),
+          },
+        },
+        (message) => progress(`Влага · ${message}`),
+      );
+    let clamp = new Map(),
+      r,
+      iterations = 0,
+      stable = false;
+    const maxIterations = climate.maxIterations ?? 200;
+    if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 1000) throw Error("Недопустимый лимит итераций конденсации.");
+    while (iterations < maxIterations) {
+      iterations++;
+      r = run(clamp);
+      if (!r.converged) throw Error("Расчёт диффузии пара не сошёлся; результат не принят.");
+      const g = new Map(r.clampedReactions),
+        next = new Map();
+      for (const [i] of clamp) if (g.get(i) < 0) next.set(i, sat[i]);
+      for (let i = 0; i < n; i++)
+        if (!clamp.has(i) && !faceNodes.has(i) && r.values[i] > sat[i] * (1 + 1e-9))
+          next.set(i, sat[i]);
+      if (next.size === clamp.size && [...next.keys()].every((i) => clamp.has(i))) {
+        stable = true;
+        break;
+      }
+      clamp = next;
+    }
+    if (!stable) throw Error(`Зона конденсации не сошлась за ${maxIterations} итераций; результат не принят.`);
+    // Inflow into a clamped node = −reaction; that is the condensation rate.
+    const condensing = r.clampedReactions
+      .map(([i, v]) => ({ node: i, x: nodes[i].x, y: nodes[i].y, rate: -v * DELTA0 }))
+      .filter((c) => c.rate > 0);
+    const regionsOf = Array.from({ length: n }, () => new Set());
+    thermal.triangles.forEach((t) => t.v.forEach((i) => regionsOf[i].add(t.region)));
+    const byRegion = new Map();
+    for (const c of condensing)
+      for (const ri of regionsOf[c.node])
+        byRegion.set(ri, (byRegion.get(ri) || 0) + c.rate / regionsOf[c.node].size);
+    let inside = { rh: 0, x: null, y: null };
+    for (let i = 0; i < n; i++)
+      if (!faceNodes.has(i) && r.values[i] / sat[i] > inside.rh)
+        inside = { rh: r.values[i] / sat[i], x: nodes[i].x, y: nodes[i].y };
+    const assessment=surfaceHumidity(model,thermal,climate);
+    const {surface,factor}=assessment;
+    const boundaryNet=r.heat.rows.filter(row=>row.boundaryIndex!==undefined).reduce((sum,row)=>sum+row.outward*DELTA0,0);
+    const totalRate=condensing.reduce((sum,c)=>sum+c.rate,0);
+    const massResidual=boundaryNet+totalRate;
+    if(Math.abs(massResidual)>1e-12+1e-5*Math.max(totalRate,Math.abs(boundaryNet))) throw Error("Нарушен баланс массы пара; результат не принят.");
+    return {
+      values: r.values,
+      saturation: Array.from(sat),
+      condensing,
+      total: condensing.reduce((s, c) => s + c.rate, 0),
+      byRegion: [...byRegion].map(([ri, rate]) => ({ name: model.regions[ri].name, rate })),
+      inside,
+      surface,
+      factor,
+      climate: assessment.climate,
+      massResidual,
+      iterations,
+      stable,
+      converged: stable && r.converged,
+    };
+  }
+  function surfaceHumidity(model, thermal, climate) {
+    if (!(finite(climate.room) && climate.room > 0 && climate.room <= 100)) throw Error("Задайте влажность комнаты от 0 до 100 %.");
+    const {nodes,boundaryEdges}=thermal, T=thermal.values, sat=Float64Array.from(T,psat),
+      phi={room:climate.room/100}, faces=(model.boundaries||[]).filter(b=>["room","outside","ground"].includes(b.role)),
+      onFace=(bcs,e)=>bcs.some(b=>e.v.every(i=>distance(nodes[i],b.a,b.b)<EPS));
+    const interiors=(model.boundaries||[]).filter(b=>b.interior);
+    if(!interiors.length && climate.mode === "surface") throw Error("Отметьте внутреннюю поверхность для оценки влажности.");
+    if(interiors.some(b=>b.type!=="film")) throw Error("Для оценки влажности поверхности задайте температуру воздуха и h.");
+
+    let surface = null;
+    for (const bc of (model.boundaries || []).filter((b) => b.interior)) {
+      const p = phi.room * psat(bc.temperature);
+      for (const e of boundaryEdges)
+        if (onFace([bc], e))
+          for (const i of e.v) {
+            const rh = p / sat[i];
+            if (!surface || rh > surface.rh)
+              surface = { rh, t: T[i], x: nodes[i].x, y: nodes[i].y, air: bc.temperature, p, h: bc.type === "film" ? bc.h : null };
+          }
+    }
+    const temps = (role) => [...new Set(faces.filter((b) => b.role === role).map((b) => b.temperature))],
+      room = temps("room"),
+      outside = temps("outside"),
+      p0 = room.length === 1 ? phi.room * psat(room[0]) : null,
+      single = room.length === 1 && outside.length === 1 && room[0] !== outside[0] && !model.regions.some(r=>finite(r.temperature)) && !faces.some(b=>b.role==="ground");
+    const factor = single && thermal.heat.minSurface !== null
+      ? {
+          fRsi: (thermal.heat.minSurface - outside[0]) / (room[0] - outside[0]),
+          // Mould: surface RH ≤ 80 %, ISO 13788.
+          fRsiMin: (dewPoint(p0 / 0.8) - outside[0]) / (room[0] - outside[0]),
+        }
+      : null;
+    return {surfaceOnly:true, surface, factor, condensing:[], climate:{...climate, roomTemperatures:room,outsideTemperatures:outside,roomPressure:p0,dewPoint:p0?dewPoint(p0):null,mouldTemperature:p0?dewPoint(p0/0.8):null}};
+  }
+  // Volumetric heat capacity ρc, J/(m³·K): given directly (ground, ISO 13370)
+  // or as density × specific heat.
+  const heatCapacityOf = (r) =>
+    r.rhoC > 0 ? r.rhoC : r.density > 0 && r.heatCapacity > 0 ? r.density * r.heatCapacity : null;
+  // Temperatures per role at time t (s): linear between key frames, constant
+  // outside them. Roles not set in any frame are absent (faces keep their own T).
+  function scenarioAt(frames, t) {
+    const out = {};
+    for (const role of ["room", "outside", "ground"]) {
+      const keyed = frames.filter((f) => finite(f[role]));
+      if (!keyed.length) continue;
+      const k = keyed.findIndex((f) => f.t >= t);
+      if (k < 0) out[role] = keyed.at(-1)[role];
+      else if (k === 0) out[role] = keyed[0][role];
+      else {
+        const a = keyed[k - 1],
+          b = keyed[k],
+          s = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1;
+        out[role] = a[role] + s * (b[role] - a[role]);
+      }
+    }
+    return out;
+  }
+  /* Transient conduction ρc·∂T/∂t = ∇·(λ∇T) on the steady mesh. Implicit
+   * Euler with a lumped mass matrix: stable for SPD systems, first order in time.
+   * A discrete maximum principle additionally depends on mesh and boundary matrices. The step is constant, so the matrix is
+   * assembled once; each step is a PCG solve warm-started from the last one.
+   * Starts from the steady field of the first key frame. Key frames give air
+   * or surface temperatures per role (room / outside / ground); faces without
+   * a role, or with a role not set in the frames, keep their own temperature.
+   * Fixed-temperature regions stay fixed. No latent heat (freezing). */
+  function transient(model, options, scenario, progress = () => {}) {
+    const frames = (scenario.frames || []).slice().sort((a, b) => a.t - b.t),
+      duration = scenario.duration,
+      steps = Math.round(scenario.steps),
+      outputs = Math.max(1, Math.min(steps, Math.round(scenario.outputs || 100)));
+    if (!(finite(duration) && duration > 0))
+      throw Error("Длительность процесса должна быть положительной.");
+    if (!(steps >= 1 && steps <= 100000))
+      throw Error("Число шагов по времени: от 1 до 100 000.");
+    if (!frames.length || frames.some((f) => !finite(f.t) || f.t < 0))
+      throw Error("Нужен хотя бы один ключевой кадр с временем ≥ 0.");
+    const missing = model.regions.filter(
+      (r) => r.temperature === undefined && !(heatCapacityOf(r) > 0),
+    );
+    if (missing.length)
+      throw Error(
+        `Для расчёта во времени задайте ρ и c: ${missing
+          .slice(0, 5)
+          .map((r) => r.name)
+          .join(", ")}${missing.length > 5 ? " …" : ""}.`,
+      );
+    const bcs = model.boundaries || [],
+      temperaturesAt = (t) => {
+        const v = scenarioAt(frames, t);
+        return bcs.map((b) => (b.role in v ? v[b.role] : b.temperature));
+      },
+      initial = temperaturesAt(0);
+    const start = solve(
+      { ...model, boundaries: bcs.map((b, i) => ({ ...b, temperature: initial[i] })) },
+      options,
+      (message) => progress(`Начальное состояние · ${message}`),
+    );
+    if (!start.converged)
+      throw Error("Начальное стационарное состояние не сошлось.");
+    const { nodes, triangles, boundaryEdges } = start,
+      n = nodes.length,
+      dt = duration / steps,
+      rows = Array.from({ length: n }, () => new Map()),
+      add = (i, j, v) => rows[i].set(j, (rows[i].get(j) || 0) + v),
+      mass = new Float64Array(n),
+      fixedRegion = new Map();
+    triangles.forEach((t) => {
+      const p = t.v.map((i) => nodes[i]),
+        det = cross(...p),
+        r = model.regions[t.region],
+        g = [
+          [p[1].y - p[2].y, p[2].x - p[1].x],
+          [p[2].y - p[0].y, p[0].x - p[2].x],
+          [p[0].y - p[1].y, p[1].x - p[0].x],
+        ];
+      for (let i = 0; i < 3; i++)
+        for (let j = 0; j < 3; j++)
+          add(t.v[i], t.v[j], (r.lambda / (2 * det)) * (g[i][0] * g[j][0] + g[i][1] * g[j][1]));
+      if (finite(r.temperature)) t.v.forEach((i) => fixedRegion.set(i, r.temperature));
+      else {
+        const share = (heatCapacityOf(r) * det) / 2 / 1e6 / 3; // J/(m·K) per node
+        t.v.forEach((i) => (mass[i] += share));
+      }
+    });
+    const film = [],
+      surface = new Map(),
+      interior = new Set();
+    for (const e of boundaryEdges) {
+      const [a, b] = e.v.map((i) => nodes[i]),
+        face = bcs.findIndex(
+          (bc) => distance(a, bc.a, bc.b) < EPS && distance(b, bc.a, bc.b) < EPS,
+        );
+      if (face < 0) continue;
+      const bc = bcs[face],
+        [i, j] = e.v,
+        L = length(a, b) / 1000;
+      if (bc.interior) e.v.forEach((k) => interior.add(k));
+      if (bc.type === "film") {
+        add(i, i, (bc.h * L) / 3);
+        add(j, j, (bc.h * L) / 3);
+        add(i, j, (bc.h * L) / 6);
+        add(j, i, (bc.h * L) / 6);
+        film.push({ i, j, w: (bc.h * L) / 2, index: face, role: bc.role });
+      } else
+        for (const k of e.v)
+          surface.set(k, [...(surface.get(k) || []), face]);
+    }
+    // Fixed nodes: surface temperatures (mean at a jump, as in solve) and
+    // fixed-temperature regions.
+    const fixedValue = (k, temps) => {
+      if (fixedRegion.has(k)) {
+        if((surface.get(k)||[]).some(i=>Math.abs(temps[i]-fixedRegion.get(k))>EPS)) throw Error("Конфликт температур источника и поверхности во времени.");
+        return fixedRegion.get(k);
+      }
+      const v = surface.get(k).map((b) => temps[b]);
+      if(Math.max(...v)-Math.min(...v)>EPS && !options.allowTemperatureJumps) throw Error("Конфликт температур поверхностей во времени.");
+      return (Math.min(...v) + Math.max(...v)) / 2;
+    };
+    const fixedNodes = [...new Set([...surface.keys(), ...fixedRegion.keys()])],
+      isFixed = new Uint8Array(n);
+    fixedNodes.forEach((k) => (isFixed[k] = 1));
+    const free = [],
+      index = new Int32Array(n).fill(-1);
+    for (let k = 0; k < n; k++) if (!isFixed[k]) index[k] = free.push(k) - 1;
+    const m = free.length,
+      rowStart = new Int32Array(m + 1),
+      cols = [],
+      vals = [],
+      diag = new Float64Array(m),
+      couple = [];
+    free.forEach((k, r) => {
+      for (const [j, v] of rows[k]) {
+        const value = j === k ? v + mass[k] / dt : v;
+        if (isFixed[j]) couple.push(r, j, value);
+        else {
+          cols.push(index[j]);
+          vals.push(value);
+          if (j === k) diag[r] = value;
+        }
+      }
+      rowStart[r + 1] = cols.length;
+    });
+    const col = Int32Array.from(cols),
+      val = Float64Array.from(vals),
+      x = new Float64Array(m),
+      rhs = new Float64Array(m),
+      res = new Float64Array(m),
+      z = new Float64Array(m),
+      p = new Float64Array(m),
+      ap = new Float64Array(m);
+    const multiply = (v, out) => {
+      for (let r = 0; r < m; r++) {
+        let s = 0;
+        for (let k = rowStart[r]; k < rowStart[r + 1]; k++) s += val[k] * v[col[k]];
+        out[r] = s;
+      }
+    };
+    // Symmetric Gauss–Seidel preconditioner, as in solve().
+    const precondition = () => {
+      for (let r = 0; r < m; r++) {
+        let s = res[r];
+        for (let k = rowStart[r]; k < rowStart[r + 1]; k++) if (col[k] < r) s -= val[k] * z[col[k]];
+        z[r] = s / diag[r];
+      }
+      for (let r = m - 1; r >= 0; r--) {
+        let s = z[r] * diag[r];
+        for (let k = rowStart[r]; k < rowStart[r + 1]; k++) if (col[k] > r) s -= val[k] * z[col[k]];
+        z[r] = s / diag[r];
+      }
+    };
+    const dot = (a, b) => {
+      let s = 0;
+      for (let r = 0; r < m; r++) s += a[r] * b[r];
+      return s;
+    };
+    let iterationsTotal = 0;
+    function step() {
+      multiply(x, ap);
+      let scale = 0;
+      for (let r = 0; r < m; r++) scale = Math.max(scale, Math.abs(rhs[r]));
+      const tolerance = 1e-10 * Math.max(1, scale);
+      let error = 0;
+      for (let r = 0; r < m; r++) {
+        res[r] = rhs[r] - ap[r];
+        error = Math.max(error, Math.abs(res[r]));
+      }
+      if (error <= tolerance) return;
+      precondition();
+      p.set(z);
+      let rz = dot(res, z);
+      for (let it = 0; it < 20000; it++) {
+        multiply(p, ap);
+        const alpha = rz / dot(p, ap);
+        error = 0;
+        for (let r = 0; r < m; r++) {
+          x[r] += alpha * p[r];
+          res[r] -= alpha * ap[r];
+          error = Math.max(error, Math.abs(res[r]));
+        }
+        iterationsTotal++;
+        if (error <= tolerance) {
+          multiply(x, ap);
+          error=0;
+          for(let r=0;r<m;r++) { res[r]=rhs[r]-ap[r]; error=Math.max(error,Math.abs(res[r])); }
+          if(error<=tolerance) return;
+          precondition(); p.set(z); rz=dot(res,z); continue;
+        }
+        precondition();
+        const next = dot(res, z),
+          beta = next / rz;
+        for (let r = 0; r < m; r++) p[r] = z[r] + beta * p[r];
+        rz = next;
+      }
+      throw Error("Шаг по времени не сошёлся. Уменьшите шаг или проверьте модель.");
+    }
+    const T = Float64Array.from(start.values);
+    free.forEach((k, r) => (x[r] = T[k]));
+    const out = [],
+      times = [],
+      minNode = [],
+      series = { t: [], tsiMin: [], roomFlow: [], outsideFlow: [], groundFlow: [], otherFlow: [], sourceFlow: [], storageRate: [], energyResidual: [] };
+    const previousT = Float64Array.from(T);
+    const record = (t, temps, save) => {
+      let low = Infinity,
+        node = -1;
+      for (const k of interior)
+        if (T[k] < low) {
+          low = T[k];
+          node = k;
+        }
+      const flows={room:0,outside:0,ground:0,other:0};
+      const load=new Float64Array(n);
+      const bucket=role=>role in flows ? role : "other";
+      for (const f of film) {
+        const q=2*f.w*((T[f.i]+T[f.j])/2-temps[f.index]);
+        flows[bucket(f.role)]+=q;
+        load[f.i]+=f.w*temps[f.index]; load[f.j]+=f.w*temps[f.index];
+      }
+      let storage=0, sourceIn=0;
+      for(let k=0;k<n;k++) {
+        const accumulation=t>0 ? mass[k]*(T[k]-previousT[k])/dt : 0;
+        storage+=accumulation;
+        if(!isFixed[k]) continue;
+        let reaction=accumulation-load[k];
+        for(const [j,v] of rows[k]) reaction+=v*T[j];
+        if(fixedRegion.has(k)) sourceIn+=reaction;
+        else {
+          const faces=[...new Set(surface.get(k))];
+          for(const i of faces) flows[bucket(bcs[i].role)]-=reaction/faces.length;
+        }
+      }
+      const residual=storage+Object.values(flows).reduce((a,b)=>a+b,0)-sourceIn;
+      const scale=Math.max(1,Math.abs(storage),Math.abs(sourceIn),...Object.values(flows).map(Math.abs));
+      if(!Number.isFinite(residual)||Math.abs(residual)>1e-6+1e-5*scale) throw Error("Нарушен баланс энергии временного шага; результат не принят.");
+      series.storageRate.push(storage); series.energyResidual.push(residual);
+      series.groundFlow.push(flows.ground); series.otherFlow.push(flows.other); series.sourceFlow.push(sourceIn);
+      const room=-flows.room, outside=flows.outside;
+      series.t.push(t);
+      series.tsiMin.push(node < 0 ? null : low);
+      series.roomFlow.push(room);
+      series.outsideFlow.push(outside);
+      if (save) {
+        out.push(Float32Array.from(T));
+        times.push(t);
+        minNode.push(node);
+      }
+    };
+    const saveAt = new Set(Array.from({ length: outputs + 1 }, (_, k) => Math.round((k * steps) / outputs)));
+    record(0, initial, true);
+    for (let s = 1; s <= steps; s++) {
+      const t = s * dt,
+        temps = temperaturesAt(t);
+      previousT.set(T);
+      for (const k of fixedNodes) T[k] = fixedValue(k, temps);
+      free.forEach((k, r) => (rhs[r] = (mass[k] / dt) * T[k]));
+      for (const f of film) {
+        const v = f.w * temps[f.index];
+        if (!isFixed[f.i]) rhs[index[f.i]] += v;
+        if (!isFixed[f.j]) rhs[index[f.j]] += v;
+      }
+      for (let c = 0; c < couple.length; c += 3) rhs[couple[c]] -= couple[c + 2] * T[couple[c + 1]];
+      step();
+      free.forEach((k, r) => (T[k] = x[r]));
+      record(t, temps, saveAt.has(s));
+      if (s % Math.max(1, Math.round(steps / 50)) === 0)
+        progress(`Расчёт во времени · шаг ${s}/${steps} · ${n} узлов`);
+    }
+    return {
+      start,
+      frames: out,
+      times,
+      minNode,
+      series,
+      dt,
+      steps,
+      iterations: iterationsTotal,
+      scenario: { ...scenario, frames },
+    };
+  }
+  const api = {
+    mesh,
+    solve,
+    validate,
+    distance,
+    vapour,
+    surfaceHumidity,
+    transient,
+    scenarioAt,
+    psat,
+    dewPoint,
+    factory: thermoSolver,
+  };
   if (typeof module !== "undefined") module.exports = api;
   else root.ThermoFEM = api;
 })(globalThis);
